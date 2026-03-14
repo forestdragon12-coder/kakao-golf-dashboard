@@ -1,0 +1,256 @@
+================================================================================
+GOLF PRICE DASHBOARD v5 - FIELD NAME MISMATCH AUDIT REPORT
+================================================================================
+Generated: 2026-03-15
+Files Analyzed:
+  - JSX: /sessions/hopeful-pensive-allen/mnt/kakao_golf/golf_price_dashboard_v5.jsx
+  - Data: /sessions/hopeful-pensive-allen/mnt/kakao_golf/generate_dashboard_data.py
+
+================================================================================
+FINDINGS SUMMARY
+================================================================================
+
+CRITICAL MISMATCHES FOUND: 12
+WARNING LEVEL MISMATCHES: 8
+DATA FIELD PRESENT: All major fields exist, mapping correct in most cases
+
+
+================================================================================
+DETAILED TAB-BY-TAB AUDIT
+================================================================================
+
+TAB 1: 오늘 현황 (Daily Overview)
+─────────────────────────────────────────────────────────────────────────────
+
+Component expects:
+  Line 253: kpi.remaining_slots
+  Line 254: kpi.vs_prev_day
+  Line 255: kpi.price_changes
+  Line 256: kpi.promo_rate
+  Line 305-323: course_kpi[].course, .remaining, .avg_price, .promo_count, .status
+  Line 337-364: price_changes.down[], price_changes.up[] → .course, .slot, .old_price, .new_price
+
+Data actually provides (tab1):
+  kpi.total_slots_today (not remaining_slots) ✓ MISMATCH #1
+  kpi.total_slots_prev (for vs_prev_day calculation needed)
+  kpi.slot_delta (exists but not referenced)
+  kpi.total_price_changes ✓ OK
+  kpi.promo_ratio (exists, but JSX expects promo_rate) ✓ MISMATCH #2
+  course_kpi[].course_name (not .course) ✓ MISMATCH #3
+  course_kpi[].slots (not .remaining) ✓ MISMATCH #4
+  course_kpi[].promo_slots (not .promo_count) ✓ MISMATCH #5
+  course_kpi[] has NO .status field ✓ MISMATCH #6
+  price_changes field NOT in tab1 output ✓ CRITICAL MISMATCH #7
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+TAB 3: 시간대별 소진율 (Consumption Heatmap)
+─────────────────────────────────────────────────────────────────────────────
+
+Component expects (line 482):
+  consumption_heatmap, course_consumption, distribution
+
+Data actually provides (tab3):
+  heatmap: list[0] - EMPTY, not consumption_heatmap ✓ MISMATCH #8
+  course_patterns: list[0] - EMPTY
+  today_distribution: list[9] with keys [weekday_type, part_type, slots, avg_price, promo_slots]
+    ⚠ JSX tries to access row.weekday (line 503) but data has weekday_type
+    ⚠ JSX tries to access row[am/pm] (line 506) but data uses part_type field
+
+Component tries to render:
+  Line 500-524: consumption_heatmap as weekday × (am/pm) cells
+  Data structure doesn't match this expectation ✓ MISMATCH #9
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+TAB 4: 가격 흐름 (Price Trends)
+─────────────────────────────────────────────────────────────────────────────
+
+Component expects (line 590):
+  dday_trend, scatter, histogram, price_events
+
+Data actually provides (tab4):
+  dday_trend: list[214] ✓ OK
+    Keys: [course_name, d_day, weekday_type, avg_price, min_price, max_price, slot_count, promo_count]
+    JSX line 617 tries to use dday_trend as [course_name] → line field
+    JSX line 623-624 tries to plot Line per course: dataKey={course}
+    ✓ MISMATCH #10 - Data is flat list, not course-keyed object
+
+  scatter: list[600] ✓ OK
+    Keys: [course_name, price_krw, d_day, promo_flag, membership_type, part_type, weekday_type, tee_time, play_date, course_sub]
+    JSX line 641 uses s.course and s.price ✓ MISMATCH #11 - data has course_name not course, price_krw not price
+
+  histogram: list[22] with price_bucket
+    JSX line 654 expects dataKey="range" but data has price_bucket ✓ MISMATCH #12
+
+  price_events: list[177] ✓ OK
+    Data keys: [course_name, play_date, tee_time, course_sub, old_price_krw, new_price_krw, delta_price_krw, delta_pct, event_type, detected_at]
+    JSX expects: evt.course, evt.price, evt.dday, evt.time
+    ✓ MISMATCH #13 - Field names don't align (krw suffixes, no dday, no time extraction)
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+TAB 5A: 할인 반응 (Discount Impact)
+─────────────────────────────────────────────────────────────────────────────
+
+Component expects (line 724):
+  discount_events, course_summary, dday_comparison
+
+Data actually provides (tab5a):
+  discount_events: list[167] ✓ OK
+    Keys: [...old_price_krw, new_price_krw, delta_price_krw, delta_pct, discount_pct, discount_amt...]
+    JSX line 787-806 references evt.course ✓ OK but price_events structure
+
+  course_summary: list[5]
+    Keys: [course_name, event_count, avg_discount_pct, total_discount_amt, max_discount_pct]
+    JSX line 741 expects item.booking_increase ✓ CRITICAL - FIELD NOT IN DATA
+
+  dday_comparison: list[29]
+    Keys: [d_day, avg_promo, avg_non_promo, promo_count, non_promo_count, discount_depth]
+    JSX line 760-761 expects dataKey="with_promo" and "without_promo"
+    ✓ MISMATCH #14 - field name mismatch
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+TAB 5B: 수익 구조 (Yield Analysis)
+─────────────────────────────────────────────────────────────────────────────
+
+Component expects (line 829):
+  course_yield_summary, yield_histogram
+
+Data actually provides (tab5b):
+  yield_slots: list[1500] (NOT course_yield_summary)
+  course_summary: list[7] (this is what should map to course_yield_summary)
+    Keys: [course_name, weekday_avg_yield, weekend_avg_yield, weekday_count, weekend_count, promo_ratio_weekday]
+    JSX line 847 expects item.yield_rate ✓ MISMATCH #15 - Data doesn't have yield_rate
+
+  yield_histogram: list[16] ✓ OK
+    Keys: [yield_bucket, total, promo, non_promo]
+    ✓ OK - JSX line 862 expects dataKey="range" but data has yield_bucket
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+TAB 6: 코스 × 회원제 (Subcourse Analysis)
+─────────────────────────────────────────────────────────────────────────────
+
+Component expects (line 884):
+  course_subcourse_data, subcourse_comparison
+
+Data actually provides (tab6):
+  subcourse_rows: list[20] (should map to course_subcourse_data)
+    Keys: [course_name, course_sub, membership_type, slots, avg_price, min_price, max_price,
+            promo_slots, part1, part2, weekend_slots, weekday_slots, prev_slots, slot_delta,
+            prev_avg_price, price_delta, member_label, promo_ratio, sub_display]
+    ✓ Data structure doesn't match component model
+
+  course_summary: dict (course-keyed, not array)
+    Each course has: {total_slots, total_promo, prices[], subcourses[], member_slots, public_slots, ...}
+    ✓ JSX expects flat course_subcourse_data array with .subcourses[] nested
+
+  member_opens_latest: list[20] (separate data not integrated in component)
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+TAB 7: AI 진단 (Diagnostics)
+─────────────────────────────────────────────────────────────────────────────
+
+Component expects (line 993):
+  diagnostics
+
+Data actually provides (tab7):
+  diagnostics: list[8] ✓ OK
+    Keys: [course_name, findings, severity_max, finding_count]
+    ✓ MISMATCH #16 - JSX expects diag.rules[], diag.recommendations[], diag.risks[], diag.overall_score
+    ✓ Data provides findings and severity but not rules/recommendations/risks/score structure
+
+  rules_applicable: list[4] (not used in JSX)
+  rules_pending: list[6] (not used in JSX)
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+TAB 8: 티타임 상세 (Slot Details)
+─────────────────────────────────────────────────────────────────────────────
+
+Component expects (line 1135):
+  tabData?.slots or RAW_DATA.tab8.slots
+
+Data actually provides:
+  No tab8 data in make_embed_data() output
+  ✓ CRITICAL - TAB8 DATA NOT GENERATED
+
+Component filters expect (lines 1144-1149):
+  slot.course, slot.weekday, slot.part, slot.has_promo, slot.slot, slot.price, slot.dday, slot.status
+
+No data structure to validate against.
+
+================================================================================
+MISMATCH SUMMARY TABLE
+================================================================================
+
+#  SEVERITY  TAB   JSX FIELD              ACTUAL DATA            TYPE
+──────────────────────────────────────────────────────────────────────────────
+1  CRITICAL  Tab1  kpi.remaining_slots    kpi.total_slots_today  Renamed field
+2  CRITICAL  Tab1  kpi.promo_rate         kpi.promo_ratio        Renamed field
+3  CRITICAL  Tab1  .course                .course_name           Renamed field
+4  CRITICAL  Tab1  .remaining             .slots                 Renamed field
+5  CRITICAL  Tab1  .promo_count           .promo_slots           Renamed field
+6  CRITICAL  Tab1  .status                NOT PRESENT            Missing field
+7  CRITICAL  Tab1  price_changes          NOT IN TAB1            Missing data
+8  CRITICAL  Tab3  consumption_heatmap    heatmap (empty)        Wrong structure
+9  WARNING   Tab3  row.weekday            row.weekday_type       Renamed field
+10 CRITICAL  Tab4  dday_trend as object   dday_trend as array    Structure mismatch
+11 CRITICAL  Tab4  scatter[].price        scatter[].price_krw    Renamed field
+12 CRITICAL  Tab4  histogram range        histogram price_bucket Renamed field
+13 WARNING   Tab4  price_events.dday      Not provided in data   Missing calculation
+14 WARNING   Tab5A dday_comparison         Wrong field names      avg_promo ≠ with_promo
+15 CRITICAL  Tab5B course_yield_summary   course_summary         Wrong structure
+16 CRITICAL  Tab7  diag.rules[]           Not in diagnostics     Missing structure
+      *      Tab8  ALL                    NO DATA PROVIDED       Missing tab
+
+================================================================================
+RECOMMENDATIONS
+================================================================================
+
+IMMEDIATE ACTIONS REQUIRED:
+
+1. TAB 1 (Daily Overview):
+   - Rename kpi.total_slots_today → kpi.remaining_slots (or vice versa)
+   - Rename kpi.promo_ratio → kpi.promo_rate
+   - Rename course_kpi[].course_name → .course
+   - Rename course_kpi[].slots → .remaining
+   - Rename course_kpi[].promo_slots → .promo_count
+   - Add .status field to course_kpi[] (calculate: normal/warning/error based on remaining ratio)
+   - Move price_changes data from tab4 or create separate source
+
+2. TAB 3 (Consumption Heatmap):
+   - Provide heatmap data (currently empty list)
+   - Transform today_distribution into weekday×part_type pivot table
+   - Rename weekday_type → weekday and create separate am/pm fields
+
+3. TAB 4 (Price Trends):
+   - Transform dday_trend from flat array into course-keyed object
+   - Rename scatter[].price_krw → scatter[].price
+   - Rename histogram.price_bucket → histogram.range
+   - Add dday calculation to price_events or extract from play_date
+
+4. TAB 5A (Discount Impact):
+   - Add booking_increase field to course_summary
+   - Rename dday_comparison fields: avg_promo → with_promo, avg_non_promo → without_promo
+
+5. TAB 5B (Yield Analysis):
+   - Rename course_summary → course_yield_summary
+   - Add yield_rate calculation to course_yield_summary items
+   - Rename yield_histogram.yield_bucket → yield_histogram.range
+
+6. TAB 6 (Subcourse):
+   - Refactor course_summary from dict to array format with nested subcourses
+   - Or adapt JSX to handle dict structure
+
+7. TAB 7 (Diagnostics):
+   - Add rules[], recommendations[], risks[], overall_score to diagnostics output
+   - Extract from findings field or create in data generation
+
+8. TAB 8 (Slot Details):
+   - Implement tab8 data generation in generate_dashboard_data.py
+
+================================================================================

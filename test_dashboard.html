@@ -1,0 +1,29 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8" />
+  <title>Test</title>
+  <style>body { margin: 0; background: #0F172A; color: #E2E8F0; font-family: sans-serif; }</style>
+</head>
+<body>
+  <div id="root"></div>
+  <script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+  <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+  <script>
+    window.__GOLF_DATA__ = { metadata: { all_dates: ["2026-03-15"], latest_date: "2026-03-15", courses: ["테스트"], member_courses: [] }, tab1: {"2026-03-15": {kpi: {total_slots_today: 100, total_slots_prev: 90, slot_delta: 10, total_price_changes: 5, changes_by_type: {}, total_promo_slots: 20, promo_ratio: 20.0}, course_kpi: [], alerts: [], price_changes: {}, calendar: [] }} };
+    window.__GOLF_TAB8_TODAY__ = { slots: [] };
+  </script>
+  <script>
+    try {
+      const e = React.createElement;
+      const root = ReactDOM.createRoot(document.getElementById('root'));
+      root.render(e('div', {style:{padding:40}}, 
+        e('h1', {style:{color:'#F1F5F9'}}, 'React OK'),
+        e('p', null, 'Data loaded: ' + (window.__GOLF_DATA__?.metadata?.latest_date || 'NO'))
+      ));
+    } catch(err) {
+      document.getElementById('root').innerText = 'ERROR: ' + err.message;
+    }
+  </script>
+</body>
+</html>
