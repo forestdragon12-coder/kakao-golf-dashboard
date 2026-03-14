@@ -797,30 +797,35 @@ const Tab4 = ({ context, metadata }) => {
                       <g>
                         {/* SVG defs: 글로우 필터 + 그라데이션 */}
                         <defs>
-                          <filter id={`glow_${uid}`} x="-50%" y="-50%" width="200%" height="200%">
-                            <feGaussianBlur in="SourceGraphic" stdDeviation="3" result="blur" />
+                          {/* 이중 글로우: 넓은 후광 + 선명한 코어 */}
+                          <filter id={`glow_${uid}`} x="-80%" y="-80%" width="260%" height="260%">
+                            <feGaussianBlur in="SourceGraphic" stdDeviation="4" result="blur1" />
+                            <feGaussianBlur in="SourceGraphic" stdDeviation="1.5" result="blur2" />
                             <feMerge>
-                              <feMergeNode in="blur" />
+                              <feMergeNode in="blur1" />
+                              <feMergeNode in="blur2" />
                               <feMergeNode in="SourceGraphic" />
                             </feMerge>
                           </filter>
                           {hasDrop && (
                             <linearGradient id={`dropG_${uid}`} x1="0" y1="1" x2="0" y2="0">
-                              <stop offset="0%" stopColor="#EF4444" stopOpacity="0.85" />
-                              <stop offset="40%" stopColor="#EF4444" stopOpacity="0.45" />
-                              <stop offset="100%" stopColor="#EF4444" stopOpacity="0" />
+                              <stop offset="0%" stopColor="#FFFFFF" stopOpacity="0.9" />
+                              <stop offset="30%" stopColor="#E0F2FE" stopOpacity="0.6" />
+                              <stop offset="70%" stopColor="#BAE6FD" stopOpacity="0.2" />
+                              <stop offset="100%" stopColor="#7DD3FC" stopOpacity="0" />
                             </linearGradient>
                           )}
                           {hasRise && (
                             <linearGradient id={`riseG_${uid}`} x1="0" y1="0" x2="0" y2="1">
-                              <stop offset="0%" stopColor="#10B981" stopOpacity="0.75" />
-                              <stop offset="40%" stopColor="#10B981" stopOpacity="0.35" />
-                              <stop offset="100%" stopColor="#10B981" stopOpacity="0" />
+                              <stop offset="0%" stopColor="#FFFFFF" stopOpacity="0.8" />
+                              <stop offset="30%" stopColor="#D1FAE5" stopOpacity="0.5" />
+                              <stop offset="70%" stopColor="#6EE7B7" stopOpacity="0.15" />
+                              <stop offset="100%" stopColor="#6EE7B7" stopOpacity="0" />
                             </linearGradient>
                           )}
                         </defs>
 
-                        {/* 하락 빔: 위쪽으로 발광 그라데이션 직사각형 */}
+                        {/* 하락 혜성빔: 흰색→하늘색 발광 (위쪽) */}
                         {hasDrop && (
                           <rect
                             x={cx - trailW / 2} y={cy - trailLen}
@@ -830,7 +835,7 @@ const Tab4 = ({ context, metadata }) => {
                             filter={`url(#glow_${uid})`}
                           />
                         )}
-                        {/* 인상 빔: 아래쪽으로 */}
+                        {/* 인상 혜성빔: 흰색→연초록 발광 (아래쪽) */}
                         {hasRise && (() => {
                           const avgRise = payload.rise_sum / payload.changed;
                           const riseLen = Math.max(20, Math.min(60, avgRise * pxPerWon));
@@ -844,16 +849,36 @@ const Tab4 = ({ context, metadata }) => {
                             />
                           );
                         })()}
-                        {/* 변동 표시: 발광 링 */}
-                        {(hasDrop || hasRise) && (
-                          <circle cx={cx} cy={cy} r={r + 3} fill="none"
-                            stroke={hasDrop ? '#EF4444' : '#10B981'} strokeWidth={2}
-                            strokeOpacity={0.8} filter={`url(#glow_${uid})`} />
+                        {/* 변동 버블: 별똥별 스타일 */}
+                        {(hasDrop || hasRise) ? (
+                          <>
+                            {/* 외곽 발광 링 — 부드러운 흰색 후광 */}
+                            <circle cx={cx} cy={cy} r={r + 4} fill="none"
+                              stroke="#FFFFFF" strokeWidth={1.5}
+                              strokeOpacity={0.4} filter={`url(#glow_${uid})`} />
+                            {/* 내곽 발광 링 — 밝고 선명한 흰색 */}
+                            <circle cx={cx} cy={cy} r={r + 2} fill="none"
+                              stroke="#FFFFFF" strokeWidth={2}
+                              strokeOpacity={0.9} filter={`url(#glow_${uid})`} />
+                            {/* 메인 버블 — 글로우 적용 */}
+                            <circle cx={cx} cy={cy} r={r}
+                              fill={color} fillOpacity={baseOpacity + 0.15}
+                              stroke="#FFFFFF" strokeWidth={1.5} strokeOpacity={0.7}
+                              filter={`url(#glow_${uid})`} />
+                            {/* ✦ 스파클 포인트 — 별똥별 반짝임 */}
+                            {[[-1, -1], [1, -1], [0.8, 0.6], [-0.7, 0.8]].map(([dx, dy], si) => (
+                              <circle key={`sp${si}`}
+                                cx={cx + dx * (r + 5)} cy={cy + dy * (r + 5)}
+                                r={1.2} fill="#FFFFFF" fillOpacity={0.7 - si * 0.12}
+                                filter={`url(#glow_${uid})`} />
+                            ))}
+                          </>
+                        ) : (
+                          /* 일반 버블 — 변동 없음 */
+                          <circle cx={cx} cy={cy} r={r}
+                            fill={color} fillOpacity={baseOpacity}
+                            stroke={color} strokeWidth={1.2} strokeOpacity={0.8} />
                         )}
-                        {/* 메인 버블 */}
-                        <circle cx={cx} cy={cy} r={r}
-                          fill={color} fillOpacity={baseOpacity}
-                          stroke={color} strokeWidth={1.2} strokeOpacity={0.8} />
                         {/* 카운트 라벨 */}
                         {payload.count >= 5 && (
                           <text x={cx} y={cy + 3.5} textAnchor="middle" fill="#fff" fontSize={9} fontWeight="600">{payload.count}</text>
@@ -870,9 +895,9 @@ const Tab4 = ({ context, metadata }) => {
           {/* 범례 보조 */}
           <div style={{ display: 'flex', gap: 20, justifyContent: 'center', marginTop: 8, ...FONT.small, color: COLORS.textMuted }}>
             <span>● 크기 = 슬롯 수</span>
-            <span style={{ color: '#EF4444' }}>☄ 위쪽 꼬리 = 가격 하락</span>
-            <span style={{ color: '#10B981' }}>↓ 아래 꼬리 = 가격 인상</span>
-            <span>숫자 = 5건 이상</span>
+            <span style={{ color: '#E0F2FE' }}>✦ 흰색 빔↑ = 가격 하락</span>
+            <span style={{ color: '#D1FAE5' }}>✦ 연초록 빔↓ = 가격 인상</span>
+            <span style={{ color: '#FFFFFF' }}>◎ 발광 = 가격 변동</span>
           </div>
         </div>
       )}
