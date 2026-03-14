@@ -1244,12 +1244,20 @@ def build_v5_data(db):
     latest = meta["latest_date"]
     prev = meta["prev_date"]
 
+    # Tab4, Tab5a: 날짜별 데이터 생성 (기준일 전환 지원)
+    tab4_all = {}
+    tab5a_all = {}
+    for i, d in enumerate(dates):
+        p = dates[i - 1] if i > 0 else None
+        tab4_all[d] = get_tab4(db, d)
+        tab5a_all[d] = get_tab5a(db, d, p)
+
     v5_data = {
         "metadata": meta,
         "tab1": get_tab1_all(db, dates),
         "tab3": get_tab3_all(db, dates),
-        "tab4": get_tab4(db, latest),  # single call (all events with dates)
-        "tab5a": get_tab5a(db, latest, prev),  # all events with dates
+        "tab4": tab4_all,
+        "tab5a": tab5a_all,
         "tab5b": get_tab5b_all(db, dates),
         "tab6": get_tab6_all(db, dates),
         "tab7": get_tab7_all(db, dates),
@@ -1329,18 +1337,26 @@ def make_embed_data(data):
         if is_v5:
             # V5 date-keyed structure
             latest_date = data["metadata"]["latest_date"]
+            # Tab4: date-keyed — 각 날짜별로 scatter 샘플링
+            tab4_embed = {}
+            if isinstance(data.get("tab4"), dict):
+                for dk, dv in data["tab4"].items():
+                    if isinstance(dv, dict) and "scatter" in dv:
+                        tab4_embed[dk] = {
+                            "dday_trend": dv.get("dday_trend", []),
+                            "histogram": dv.get("histogram", []),
+                            "price_events": dv.get("price_events", []),
+                            "scatter": _sample_scatter(dv.get("scatter", []), 600),
+                            "ghost_events": dv.get("ghost_events", []),
+                        }
+                    else:
+                        tab4_embed[dk] = dv
             embed = {
                 "metadata": data["metadata"],
                 "tab1": data["tab1"],  # keyed by date
                 "tab3": data["tab3"],  # keyed by date
-                "tab4": {
-                    "dday_trend": data["tab4"]["dday_trend"],
-                    "histogram": data["tab4"]["histogram"],
-                    "price_events": data["tab4"]["price_events"],
-                    "scatter": _sample_scatter(data["tab4"]["scatter"], 600),
-                    "ghost_events": data["tab4"].get("ghost_events", []),
-                },
-                "tab5a": data["tab5a"],  # all events with dates
+                "tab4": tab4_embed,
+                "tab5a": data["tab5a"],  # keyed by date
                 "tab5b": data["tab5b"],  # keyed by date
                 "tab6": data["tab6"],  # keyed by date
                 "tab7": data["tab7"],  # keyed by date

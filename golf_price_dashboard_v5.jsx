@@ -148,7 +148,7 @@ const InfoBanner = ({ text, level = 'info' }) => {
   );
 };
 
-const DateNavigator = ({ context, metadata }) => {
+const DateNavigator = ({ context, metadata, hideRangeMode }) => {
   const allDates = metadata?.all_dates || [];
   const moveDate = (offset) => {
     const idx = allDates.indexOf(context.anchorDate);
@@ -176,19 +176,21 @@ const DateNavigator = ({ context, metadata }) => {
           background: 'none', border: 'none', color: COLORS.accent, cursor: 'pointer', ...FONT.sectionTitle, padding: '4px 8px'
         }}>&gt;</button>
       </div>
-      <div style={{ display: 'flex', gap: 8 }}>
-        {['1d', '3d', '7d', 'all'].map(mode => (
-          <button key={mode} onClick={() => context.setRangeMode(mode)} style={{
-            padding: '8px 16px', borderRadius: 20,
-            border: `1px solid ${context.rangeMode === mode ? COLORS.accent : COLORS.secondary}`,
-            background: context.rangeMode === mode ? COLORS.accent : 'transparent',
-            color: context.rangeMode === mode ? '#fff' : COLORS.textSecondary,
-            cursor: 'pointer', ...FONT.small, fontWeight: 500, minHeight: 36
-          }}>
-            {mode === '1d' ? '당일' : mode === '3d' ? '3일' : mode === '7d' ? '7일' : '전체'}
-          </button>
-        ))}
-      </div>
+      {!hideRangeMode && (
+        <div style={{ display: 'flex', gap: 8 }}>
+          {['1d', '3d', '7d', 'all'].map(mode => (
+            <button key={mode} onClick={() => context.setRangeMode(mode)} style={{
+              padding: '8px 16px', borderRadius: 20,
+              border: `1px solid ${context.rangeMode === mode ? COLORS.accent : COLORS.secondary}`,
+              background: context.rangeMode === mode ? COLORS.accent : 'transparent',
+              color: context.rangeMode === mode ? '#fff' : COLORS.textSecondary,
+              cursor: 'pointer', ...FONT.small, fontWeight: 500, minHeight: 36
+            }}>
+              {mode === '1d' ? '당일' : mode === '3d' ? '3일' : mode === '7d' ? '7일' : '전체'}
+            </button>
+          ))}
+        </div>
+      )}
     </div>
   );
 };
@@ -588,7 +590,7 @@ const Tab3 = ({ context, metadata }) => {
 // ═══════════════════════════════════════════════════
 const Tab4 = ({ context, metadata }) => {
   const RAW_DATA = window.__GOLF_DATA__ || {};
-  const tab4 = RAW_DATA.tab4 || {};
+  const tab4 = (RAW_DATA.tab4 || {})[context.anchorDate] || {};
   const [subTab, setSubTab] = useState(0);
 
   // D-day 범위 상태 (산점도용)
@@ -597,6 +599,11 @@ const Tab4 = ({ context, metadata }) => {
     return days.length ? days : [0, 30];
   }, [tab4.scatter]);
   const [ddayRange, setDdayRange] = useState([Math.max(1, allDdays[0] || 1), allDdays[allDdays.length - 1] || 30]);
+
+  // 기준일 변경 시 D-day 범위 리셋
+  useEffect(() => {
+    setDdayRange([Math.max(1, allDdays[0] || 1), allDdays[allDdays.length - 1] || 30]);
+  }, [context.anchorDate]);
 
   // dday_trend pivot: flat array → d_day keyed with course columns
   const trendData = useMemo(() => {
@@ -678,6 +685,7 @@ const Tab4 = ({ context, metadata }) => {
   return (
     <div>
       <InfoBanner text="💰 라운드 날짜가 다가올수록 가격이 어떻게 변하는지, 어느 가격대에 티타임이 몰려 있는지 확인해요." />
+      <DateNavigator context={context} metadata={metadata} hideRangeMode />
 
       {/* 서브탭 */}
       <div style={{ display: 'flex', gap: 8, marginBottom: 24 }}>
@@ -731,53 +739,67 @@ const Tab4 = ({ context, metadata }) => {
               }}>{c}</button>
             ))}
           </div>
-          {/* D-day 범위 직접 지정 */}
-          <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 16, flexWrap: 'wrap' }}>
-            <span style={{ ...FONT.small, color: COLORS.textSecondary }}>D-day 범위:</span>
-            <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-              <span style={{ color: COLORS.textMuted, ...FONT.small }}>D-</span>
-              <input type="number" min={0} max={60}
-                value={ddayRange[0]}
-                onChange={e => {
-                  const v = Math.max(0, Number(e.target.value));
-                  setDdayRange([Math.min(v, ddayRange[1]), ddayRange[1]]);
-                }}
-                style={{
-                  width: 52, padding: '5px 8px', borderRadius: 6, textAlign: 'center',
-                  border: `1px solid ${COLORS.secondary}`, background: COLORS.bg,
-                  color: COLORS.textBright, ...FONT.body, fontWeight: 600,
-                }} />
-              <span style={{ color: COLORS.textMuted, fontWeight: 600 }}>~</span>
-              <span style={{ color: COLORS.textMuted, ...FONT.small }}>D-</span>
-              <input type="number" min={0} max={60}
-                value={ddayRange[1]}
-                onChange={e => {
-                  const v = Math.max(0, Number(e.target.value));
-                  setDdayRange([ddayRange[0], Math.max(v, ddayRange[0])]);
-                }}
-                style={{
-                  width: 52, padding: '5px 8px', borderRadius: 6, textAlign: 'center',
-                  border: `1px solid ${COLORS.secondary}`, background: COLORS.bg,
-                  color: COLORS.textBright, ...FONT.body, fontWeight: 600,
-                }} />
+          {/* D-day 범위 드래그 슬라이더 */}
+          <div style={{ marginBottom: 16 }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 10, flexWrap: 'wrap' }}>
+              <span style={{ ...FONT.small, color: COLORS.textSecondary }}>D-day 범위:</span>
+              <span style={{ ...FONT.body, fontWeight: 600, color: COLORS.accentLight }}>D-{ddayRange[0]} ~ D-{ddayRange[1]}</span>
+              {[
+                {label: '주말', r: [1, 3]},
+                {label: '7일', r: [1, 7]},
+                {label: '14일', r: [1, 14]},
+                {label: '전체', r: [allDdays[0]||1, allDdays[allDdays.length-1]||30]},
+              ].map(p => (
+                <button key={p.label} onClick={() => setDdayRange(p.r)} style={{
+                  padding: '4px 10px', borderRadius: 6, cursor: 'pointer',
+                  border: `1px solid ${ddayRange[0] === p.r[0] && ddayRange[1] === p.r[1] ? COLORS.accent : COLORS.secondary}`,
+                  background: ddayRange[0] === p.r[0] && ddayRange[1] === p.r[1] ? COLORS.accent + '20' : 'transparent',
+                  color: ddayRange[0] === p.r[0] && ddayRange[1] === p.r[1] ? COLORS.accentLight : COLORS.textSecondary,
+                  ...FONT.small,
+                }}>{p.label}</button>
+              ))}
+              <span style={{ ...FONT.small, color: COLORS.textMuted, marginLeft: 4 }}>
+                {filteredScatter.length}건{filteredScatter.filter(r => r.ghost).length > 0 && ` (소진 ${filteredScatter.filter(r => r.ghost).length})`}
+              </span>
             </div>
-            {[
-              {label: '주말', r: [1, 3]},
-              {label: '7일', r: [1, 7]},
-              {label: '14일', r: [1, 14]},
-              {label: '전체', r: [allDdays[0]||1, allDdays[allDdays.length-1]||30]},
-            ].map(p => (
-              <button key={p.label} onClick={() => setDdayRange(p.r)} style={{
-                padding: '4px 10px', borderRadius: 6, cursor: 'pointer',
-                border: `1px solid ${ddayRange[0] === p.r[0] && ddayRange[1] === p.r[1] ? COLORS.accent : COLORS.secondary}`,
-                background: ddayRange[0] === p.r[0] && ddayRange[1] === p.r[1] ? COLORS.accent + '20' : 'transparent',
-                color: ddayRange[0] === p.r[0] && ddayRange[1] === p.r[1] ? COLORS.accentLight : COLORS.textSecondary,
-                ...FONT.small,
-              }}>{p.label}</button>
-            ))}
-            <span style={{ ...FONT.small, color: COLORS.textMuted, marginLeft: 4 }}>
-              {filteredScatter.length}건{filteredScatter.filter(r => r.ghost).length > 0 && ` (소진 ${filteredScatter.filter(r => r.ghost).length})`}
-            </span>
+            {/* Dual-thumb range slider */}
+            {(() => {
+              const sliderMin = Math.max(0, allDdays[0] || 0);
+              const sliderMax = allDdays[allDdays.length - 1] || 30;
+              const range = sliderMax - sliderMin || 1;
+              const leftPct = ((ddayRange[0] - sliderMin) / range) * 100;
+              const rightPct = ((ddayRange[1] - sliderMin) / range) * 100;
+              return (
+                <div style={{ position: 'relative', height: 36, padding: '0 8px' }}>
+                  {/* Track background */}
+                  <div style={{ position: 'absolute', top: 14, left: 8, right: 8, height: 8, background: COLORS.secondary, borderRadius: 4 }} />
+                  {/* Active range */}
+                  <div style={{ position: 'absolute', top: 14, left: `calc(8px + ${leftPct}% * (100% - 16px) / 100%)`, width: `${rightPct - leftPct}%`, height: 8, background: COLORS.accent, borderRadius: 4, pointerEvents: 'none',
+                    left: `calc(8px + (100% - 16px) * ${leftPct / 100})`,
+                    width: `calc((100% - 16px) * ${(rightPct - leftPct) / 100})`,
+                  }} />
+                  {/* Min slider */}
+                  <input type="range" min={sliderMin} max={sliderMax} value={ddayRange[0]}
+                    onChange={e => { const v = Number(e.target.value); setDdayRange([Math.min(v, ddayRange[1]), ddayRange[1]]); }}
+                    style={{ position: 'absolute', top: 4, left: 0, width: '100%', height: 28, appearance: 'none', WebkitAppearance: 'none', background: 'transparent', pointerEvents: 'none', zIndex: 3,
+                      '--thumb': `${COLORS.accentLight}`,
+                    }}
+                    className="range-thumb"
+                  />
+                  {/* Max slider */}
+                  <input type="range" min={sliderMin} max={sliderMax} value={ddayRange[1]}
+                    onChange={e => { const v = Number(e.target.value); setDdayRange([ddayRange[0], Math.max(v, ddayRange[0])]); }}
+                    style={{ position: 'absolute', top: 4, left: 0, width: '100%', height: 28, appearance: 'none', WebkitAppearance: 'none', background: 'transparent', pointerEvents: 'none', zIndex: 4 }}
+                    className="range-thumb"
+                  />
+                  {/* Tick labels */}
+                  <div style={{ position: 'absolute', top: 24, left: 8, right: 8, display: 'flex', justifyContent: 'space-between' }}>
+                    <span style={{ ...FONT.tiny, color: COLORS.textMuted }}>{sliderMin}</span>
+                    <span style={{ ...FONT.tiny, color: COLORS.textMuted }}>{sliderMax}</span>
+                  </div>
+                </div>
+              );
+            })()}
           </div>
 
           <ResponsiveContainer width="100%" height={480}>
@@ -1039,7 +1061,7 @@ const Tab4 = ({ context, metadata }) => {
 // ═══════════════════════════════════════════════════
 const Tab5 = ({ context, metadata }) => {
   const RAW_DATA = window.__GOLF_DATA__ || {};
-  const tab5a = RAW_DATA.tab5a || {};
+  const tab5a = (RAW_DATA.tab5a || {})[context.anchorDate] || {};
   const [discountView, setDiscountView] = useState('all'); // 'all' | 'market' | 'promo'
 
   // 할인 이벤트를 시장 반응 vs 특가 프로모션으로 분리
@@ -1058,6 +1080,7 @@ const Tab5 = ({ context, metadata }) => {
   return (
     <div>
       <InfoBanner text="🔻 시장 반응 = 수요에 의해 실제 가격이 변동된 것 | 🏷️ 특가 프로모션 = 골프장이 처음부터 할인 라벨을 붙인 것" />
+      <DateNavigator context={context} metadata={metadata} hideRangeMode />
 
       {/* A. 인하 효과 요약 */}
       <SectionTitle title="인하 효과 분석" icon="📊" />
@@ -1630,9 +1653,28 @@ function AppInner() {
 }
 
 // 루트 App = SettingsProvider 래퍼
+const RangeSliderStyles = () => (
+  <style dangerouslySetInnerHTML={{ __html: `
+    .range-thumb::-webkit-slider-thumb {
+      -webkit-appearance: none; appearance: none;
+      width: 20px; height: 20px; border-radius: 50%;
+      background: #60A5FA; border: 2px solid #fff;
+      cursor: pointer; pointer-events: auto;
+      box-shadow: 0 0 6px rgba(96,165,250,0.5);
+    }
+    .range-thumb::-moz-range-thumb {
+      width: 18px; height: 18px; border-radius: 50%;
+      background: #60A5FA; border: 2px solid #fff;
+      cursor: pointer; pointer-events: auto;
+      box-shadow: 0 0 6px rgba(96,165,250,0.5);
+    }
+  `}} />
+);
+
 export default function App() {
   return (
     <SettingsProvider>
+      <RangeSliderStyles />
       <AppInner />
     </SettingsProvider>
   );
