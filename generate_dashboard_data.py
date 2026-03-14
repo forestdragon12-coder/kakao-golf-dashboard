@@ -601,27 +601,101 @@ def get_tab4(db, latest):
         ORDER BY detected_at, course_name
     """)
 
+    # ── price_change_events → scatter 매핑 ──
+    # tee_time_snapshots의 price_changed_flag가 누락된 경우 보정
+    # key: (course_name, play_date, tee_time) → (old_price, new_price, event_type)
+    _evt_map = {}
+    for ev in price_events:
+        ek = (ev["course_name"], ev.get("play_date"), ev.get("tee_time"))
+        # 같은 슬롯에 여러 이벤트면 마지막(최신) 것 사용
+        _evt_map[ek] = ev
+
+    _patched = 0
+    for r in scatter_raw:
+        rk = (r["course_name"], r.get("play_date"), r.get("tee_time"))
+        if rk in _evt_map and not r.get("price_changed_flag"):
+            ev = _evt_map[rk]
+            # 현재 가격이 이벤트의 new_price와 일치하면 매핑
+            if ev.get("new_price_krw") and abs(r["price_krw"] - ev["new_price_krw"]) < 1000:
+                r["price_changed_flag"] = 1
+                r["previous_price_krw"] = ev["old_price_krw"]
+                _patched += 1
+    import logging as _lg
+    _lg.getLogger(__name__).info(f"scatter price_changed_flag 보정: {_patched}건")
+
     # 골프장별 균등 샘플링 (최대 3000건, 모든 골프장 포함)
+    # ★ 가격 변동 슬롯은 무조건 포함 (혜성 효과 보장)
     from collections import defaultdict as _dd
     _by_course = _dd(list)
+    _changed_all = []
     for r in scatter_raw:
-        _by_course[r["course_name"]].append(r)
+        if r.get("price_changed_flag"):
+            _changed_all.append(r)
+        else:
+            _by_course[r["course_name"]].append(r)
     _n_courses = len(_by_course) or 1
-    _per_course = 3000 // _n_courses
-    _sampled = []
+    _remaining = 3000 - len(_changed_all)
+    _per_course = max(1, _remaining // _n_courses) if _remaining > 0 else 0
+    _sampled = list(_changed_all)  # 변동 슬롯 전부 포함
     for _c, _rows in _by_course.items():
+        if _per_course <= 0:
+            break
         if len(_rows) <= _per_course:
             _sampled.extend(_rows)
         else:
-            # 균등 간격 샘플링
             _step = len(_rows) / _per_course
             _sampled.extend(_rows[int(i * _step)] for i in range(_per_course))
+    _lg.getLogger(__name__).info(
+        f"scatter 샘플링: 변동 {len(_changed_all)}건 우선 포함, "
+        f"일반 {len(_sampled)-len(_changed_all)}건, 총 {len(_sampled)}건"
+    )
     # d_day 기준 정렬
     _sampled.sort(key=lambda r: (r["course_name"], r["d_day"]))
+
+    # ── 소진 판정: price_change_events 중 현재 스냅샷에 없는 것 ──
+    # 판정 기준:
+    #   d-day ≤ 0 (오늘 이전 경기) → 만료 (시간 지남, 소진 아님) → 제외
+    #   d-day ≥ 1 + 스냅샷에 없음 → 소진 (판매 완료) → 포함
+    from datetime import datetime as _dt
+    _current_keys = set(
+        (r["course_name"], r.get("play_date"), r.get("tee_time"))
+        for r in scatter_raw
+    )
+    _ghost_events = []
+    _expired_count = 0
+    for ev in price_events:
+        ek = (ev["course_name"], ev.get("play_date"), ev.get("tee_time"))
+        if ek not in _current_keys and ev.get("event_type") in ("인하", "인상"):
+            try:
+                pd = _dt.strptime(ev["play_date"], "%Y-%m-%d").date()
+                ld = _dt.strptime(latest, "%Y-%m-%d").date()
+                d_day = (pd - ld).days
+            except Exception:
+                d_day = 0
+            # d-day=0 이하는 만료 (시간대별 만료 구분 불가하므로 일괄 제외)
+            if d_day <= 0:
+                _expired_count += 1
+                continue
+            _ghost_events.append({
+                "course_name": ev["course_name"],
+                "price_krw": ev.get("new_price_krw", 0),
+                "d_day": d_day,
+                "promo_flag": 0,
+                "tee_time": ev.get("tee_time"),
+                "play_date": ev.get("play_date"),
+                "course_sub": ev.get("course_sub"),
+                "previous_price_krw": ev.get("old_price_krw"),
+                "price_changed_flag": 1,
+                "ghost": True,  # 소진됨 (d-day≥1인데 스냅샷에 없음)
+            })
+    _lg.getLogger(__name__).info(
+        f"소진 고스트: {len(_ghost_events)}건 (만료 제외: {_expired_count}건)"
+    )
 
     return {
         "dday_trend": dday_trend,
         "scatter": _sampled,
+        "ghost_events": _ghost_events,
         "histogram": hist_list,
         "price_events": price_events,
     }
@@ -646,26 +720,68 @@ def get_tab5a(db, latest, prev):
         ORDER BY course_name, delta_price_krw
     """)
 
+    # ── 소진 상태 판정 ──
+    # 현재 스냅샷 키 집합
+    from datetime import datetime as _dt5
+    _snap_keys = set()
+    for r in q(db, """
+        SELECT course_name, play_date, tee_time
+        FROM tee_time_snapshots WHERE collected_date = ?
+    """, (latest,)):
+        _snap_keys.add((r["course_name"], r["play_date"], r["tee_time"]))
+
     for ev in discount_events:
         ev["discount_pct"] = abs(ev.get("delta_pct") or 0)
         ev["discount_amt"] = abs(ev.get("delta_price_krw") or 0)
+        # d-day 계산
+        try:
+            pd = _dt5.strptime(ev["play_date"], "%Y-%m-%d").date()
+            ld = _dt5.strptime(latest, "%Y-%m-%d").date()
+            ev["d_day"] = (pd - ld).days
+        except Exception:
+            ev["d_day"] = 0
+        # 상태 판정
+        ek = (ev["course_name"], ev.get("play_date"), ev.get("tee_time"))
+        if ev["d_day"] <= 0:
+            ev["outcome"] = "expired"    # 만료 (결과 불명)
+        elif ek in _snap_keys:
+            ev["outcome"] = "waiting"    # 대기중 (아직 안 팔림)
+        else:
+            ev["outcome"] = "consumed"   # 소진 (인하 후 판매 완료)
 
-    # 골프장별 할인 집계
+    # ── 인하 효과 요약 ──
+    _consumed = [e for e in discount_events if e["outcome"] == "consumed"]
+    _waiting = [e for e in discount_events if e["outcome"] == "waiting"]
+    _expired = [e for e in discount_events if e["outcome"] == "expired"]
+    _actionable = len(_consumed) + len(_waiting)  # 만료 제외
+    effectiveness = {
+        "total_events": len(discount_events),
+        "consumed": len(_consumed),
+        "waiting": len(_waiting),
+        "expired": len(_expired),
+        "consumption_rate": round(len(_consumed) / _actionable * 100, 1) if _actionable > 0 else None,
+    }
+
+    # ── 골프장별 할인 집계 (소진율 포함) ──
     course_discount = defaultdict(lambda: {
         "event_count": 0, "avg_discount_pct": 0, "total_discount_amt": 0,
-        "max_discount_pct": 0, "pcts": []
+        "max_discount_pct": 0, "pcts": [],
+        "consumed": 0, "waiting": 0, "expired": 0,
     })
     for ev in discount_events:
         cn = ev["course_name"]
         course_discount[cn]["event_count"] += 1
         course_discount[cn]["total_discount_amt"] += ev["discount_amt"]
         course_discount[cn]["pcts"].append(ev["discount_pct"])
+        course_discount[cn][ev["outcome"]] += 1
         if ev["discount_pct"] > course_discount[cn]["max_discount_pct"]:
             course_discount[cn]["max_discount_pct"] = ev["discount_pct"]
 
     summary = []
     for cn, stats in course_discount.items():
         stats["avg_discount_pct"] = round(statistics.mean(stats["pcts"]), 1) if stats["pcts"] else 0
+        _act = stats["consumed"] + stats["waiting"]
+        stats["consumption_rate"] = round(stats["consumed"] / _act * 100, 1) if _act > 0 else None
         del stats["pcts"]
         summary.append({"course_name": cn, **stats})
     summary.sort(key=lambda x: -x["event_count"])
@@ -706,9 +822,9 @@ def get_tab5a(db, latest, prev):
     return {
         "discount_events": discount_events,
         "course_summary": summary,
+        "effectiveness": effectiveness,
         "promo_distribution": promo_distribution,
         "dday_comparison": dday_comparison,
-        "data_limitation": "2일 데이터 — Lift/증분 계산은 30일+ 축적 후 가능",
     }
 
 # ─────────────────────────────────────────────
@@ -1222,6 +1338,7 @@ def make_embed_data(data):
                     "histogram": data["tab4"]["histogram"],
                     "price_events": data["tab4"]["price_events"],
                     "scatter": _sample_scatter(data["tab4"]["scatter"], 600),
+                    "ghost_events": data["tab4"].get("ghost_events", []),
                 },
                 "tab5a": data["tab5a"],  # all events with dates
                 "tab5b": data["tab5b"],  # keyed by date
@@ -1241,6 +1358,7 @@ def make_embed_data(data):
             "histogram": data["tab4"]["histogram"],
             "price_events": data["tab4"]["price_events"],
             "scatter": _sample_scatter(data["tab4"]["scatter"], 600),
+            "ghost_events": data["tab4"].get("ghost_events", []),
         },
         "tab5a": data["tab5a"] if "tab5a" in data else {},
         "tab5b": {
@@ -1254,14 +1372,20 @@ def make_embed_data(data):
     return embed
 
 def _sample_scatter(scatter, target_n):
+    """변동 슬롯 100% 보존 + 나머지 균등 샘플링"""
     from collections import defaultdict
     import random
+    # 1) 변동 슬롯 무조건 포함
+    changed = [r for r in scatter if r.get("price_changed_flag")]
+    normal = [r for r in scatter if not r.get("price_changed_flag")]
+    remaining = max(0, target_n - len(changed))
+    # 2) 일반 슬롯: 골프장별 균등 샘플링
     by_course = defaultdict(list)
-    for r in scatter:
+    for r in normal:
         by_course[r["course_name"]].append(r)
-    n_courses = len(by_course)
-    per_course = max(1, target_n // n_courses)
-    result = []
+    n_courses = len(by_course) or 1
+    per_course = max(1, remaining // n_courses)
+    result = list(changed)
     for course, rows in by_course.items():
         sampled = random.sample(rows, min(per_course, len(rows)))
         result.extend(sampled)

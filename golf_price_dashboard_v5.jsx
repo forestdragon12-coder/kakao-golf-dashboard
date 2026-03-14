@@ -312,8 +312,8 @@ const Tab1 = ({ context, metadata }) => {
                 <h4 style={{ color: EVENT_COLORS[type], ...FONT.body, fontWeight: 700, marginBottom: 12 }}>
                   {type === '인하' ? '📉' : '📈'} {type} ({(price_changes[type] || []).length}건)
                 </h4>
-                <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-                  {(price_changes[type] || []).slice(0, 5).map((evt, idx) => (
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 8, maxHeight: 400, overflowY: 'auto' }}>
+                  {(price_changes[type] || []).map((evt, idx) => (
                     <div key={idx} style={{ background: COLORS.secondary, padding: '12px 14px', borderRadius: 8, ...FONT.small }}>
                       <div style={{ color: COLORS.textBright, fontWeight: 600, marginBottom: 4 }}>{evt.course_name} · {evt.course_sub}</div>
                       <div style={{ color: COLORS.textSecondary }}>{evt.play_date} {evt.tee_time}: {fmtMan(evt.old_price_krw)} → {fmtMan(evt.new_price_krw)} ({evt.delta_pct > 0 ? '+' : ''}{evt.delta_pct}%)</div>
@@ -596,7 +596,7 @@ const Tab4 = ({ context, metadata }) => {
     const days = [...new Set((tab4.scatter || []).map(r => r.d_day))].sort((a, b) => a - b);
     return days.length ? days : [0, 30];
   }, [tab4.scatter]);
-  const [ddayRange, setDdayRange] = useState([allDdays[0] || 0, allDdays[allDdays.length - 1] || 30]);
+  const [ddayRange, setDdayRange] = useState([Math.max(1, allDdays[0] || 1), allDdays[allDdays.length - 1] || 30]);
 
   // dday_trend pivot: flat array → d_day keyed with course columns
   const trendData = useMemo(() => {
@@ -626,11 +626,16 @@ const Tab4 = ({ context, metadata }) => {
   };
 
   // 범위 + 골프장 필터된 산점도 데이터
-  const filteredScatter = useMemo(() =>
-    (tab4.scatter || []).filter(r =>
+  const filteredScatter = useMemo(() => {
+    const live = (tab4.scatter || []).filter(r =>
       r.d_day >= ddayRange[0] && r.d_day <= ddayRange[1] && visibleCourses[r.course_name] !== false
-    ),
-    [tab4.scatter, ddayRange, visibleCourses]);
+    );
+    // 소진된 슬롯 고스트 이벤트도 포함 (산점도에서 보이도록)
+    const ghosts = (tab4.ghost_events || []).filter(r =>
+      r.d_day >= ddayRange[0] && r.d_day <= ddayRange[1] && visibleCourses[r.course_name] !== false
+    );
+    return [...live, ...ghosts];
+  }, [tab4.scatter, tab4.ghost_events, ddayRange, visibleCourses]);
 
   // 산점도 가격 범위
   const scatterPriceRange = useMemo(() => {
@@ -648,16 +653,19 @@ const Tab4 = ({ context, metadata }) => {
     filteredScatter.forEach(r => {
       const bucket = Math.round(r.price_krw / BUCKET) * BUCKET;
       const key = `${r.course_name}|${r.d_day}|${bucket}`;
-      if (!map[key]) map[key] = { course_name: r.course_name, d_day: r.d_day, price: bucket, count: 0, promo: 0, changed: 0, drop_sum: 0, rise_sum: 0 };
+      if (!map[key]) map[key] = { course_name: r.course_name, d_day: r.d_day, price: bucket, count: 0, promo: 0, changed: 0, ghost: 0, drop_sum: 0, rise_sum: 0, tee_times: [] };
       map[key].count++;
+      if (r.ghost) map[key].ghost++;
       if (r.promo_flag) map[key].promo++;
       if (r.price_changed_flag && r.previous_price_krw) {
         map[key].changed++;
         const diff = r.previous_price_krw - r.price_krw;
         if (diff > 0) map[key].drop_sum += diff;
         else map[key].rise_sum += Math.abs(diff);
+        if (r.tee_time) map[key].tee_times.push({ time: r.tee_time, prev: r.previous_price_krw, curr: r.price_krw, ghost: !!r.ghost });
       } else if (r.price_changed_flag) {
         map[key].changed++;
+        if (r.tee_time) map[key].tee_times.push({ time: r.tee_time, curr: r.price_krw, ghost: !!r.ghost });
       }
     });
     return Object.values(map);
@@ -723,26 +731,53 @@ const Tab4 = ({ context, metadata }) => {
               }}>{c}</button>
             ))}
           </div>
-          {/* 범위 조절 */}
-          <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: 16, flexWrap: 'wrap' }}>
-            <span style={{ ...FONT.small, color: COLORS.textSecondary }}>D-day:</span>
-            <input type="range" min={allDdays[0] || 0} max={allDdays[allDdays.length - 1] || 30}
-              value={ddayRange[0]}
-              onChange={e => { const v = Number(e.target.value); setDdayRange([Math.min(v, ddayRange[1] - 1), ddayRange[1]]); }}
-              style={{ width: 100, accentColor: COLORS.accent }} />
-            <span style={{ ...FONT.body, color: COLORS.textBright, fontWeight: 600 }}>D-{ddayRange[0]} ~ D-{ddayRange[1]}</span>
-            <input type="range" min={allDdays[0] || 0} max={allDdays[allDdays.length - 1] || 30}
-              value={ddayRange[1]}
-              onChange={e => { const v = Number(e.target.value); setDdayRange([ddayRange[0], Math.max(v, ddayRange[0] + 1)]); }}
-              style={{ width: 100, accentColor: COLORS.accent }} />
-            {[{label: '7일', r: [0, 7]}, {label: '14일', r: [0, 14]}, {label: '전체', r: [allDdays[0]||0, allDdays[allDdays.length-1]||30]}].map(p => (
+          {/* D-day 범위 직접 지정 */}
+          <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 16, flexWrap: 'wrap' }}>
+            <span style={{ ...FONT.small, color: COLORS.textSecondary }}>D-day 범위:</span>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+              <span style={{ color: COLORS.textMuted, ...FONT.small }}>D-</span>
+              <input type="number" min={0} max={60}
+                value={ddayRange[0]}
+                onChange={e => {
+                  const v = Math.max(0, Number(e.target.value));
+                  setDdayRange([Math.min(v, ddayRange[1]), ddayRange[1]]);
+                }}
+                style={{
+                  width: 52, padding: '5px 8px', borderRadius: 6, textAlign: 'center',
+                  border: `1px solid ${COLORS.secondary}`, background: COLORS.bg,
+                  color: COLORS.textBright, ...FONT.body, fontWeight: 600,
+                }} />
+              <span style={{ color: COLORS.textMuted, fontWeight: 600 }}>~</span>
+              <span style={{ color: COLORS.textMuted, ...FONT.small }}>D-</span>
+              <input type="number" min={0} max={60}
+                value={ddayRange[1]}
+                onChange={e => {
+                  const v = Math.max(0, Number(e.target.value));
+                  setDdayRange([ddayRange[0], Math.max(v, ddayRange[0])]);
+                }}
+                style={{
+                  width: 52, padding: '5px 8px', borderRadius: 6, textAlign: 'center',
+                  border: `1px solid ${COLORS.secondary}`, background: COLORS.bg,
+                  color: COLORS.textBright, ...FONT.body, fontWeight: 600,
+                }} />
+            </div>
+            {[
+              {label: '주말', r: [1, 3]},
+              {label: '7일', r: [1, 7]},
+              {label: '14일', r: [1, 14]},
+              {label: '전체', r: [allDdays[0]||1, allDdays[allDdays.length-1]||30]},
+            ].map(p => (
               <button key={p.label} onClick={() => setDdayRange(p.r)} style={{
                 padding: '4px 10px', borderRadius: 6, cursor: 'pointer',
-                border: `1px solid ${COLORS.secondary}`, background: 'transparent',
-                color: COLORS.textSecondary, ...FONT.small,
+                border: `1px solid ${ddayRange[0] === p.r[0] && ddayRange[1] === p.r[1] ? COLORS.accent : COLORS.secondary}`,
+                background: ddayRange[0] === p.r[0] && ddayRange[1] === p.r[1] ? COLORS.accent + '20' : 'transparent',
+                color: ddayRange[0] === p.r[0] && ddayRange[1] === p.r[1] ? COLORS.accentLight : COLORS.textSecondary,
+                ...FONT.small,
               }}>{p.label}</button>
             ))}
-            <span style={{ ...FONT.small, color: COLORS.textMuted }}>({filteredScatter.length}건)</span>
+            <span style={{ ...FONT.small, color: COLORS.textMuted, marginLeft: 4 }}>
+              {filteredScatter.length}건{filteredScatter.filter(r => r.ghost).length > 0 && ` (소진 ${filteredScatter.filter(r => r.ghost).length})`}
+            </span>
           </div>
 
           <ResponsiveContainer width="100%" height={480}>
@@ -758,15 +793,50 @@ const Tab4 = ({ context, metadata }) => {
               <Tooltip content={({ active, payload }) => {
                 if (active && payload && payload.length) {
                   const d = payload[0].payload;
+                  const hasDrop = d.drop_sum > 0;
+                  const hasRise = d.rise_sum > 0;
+                  const avgDrop = hasDrop && d.changed > 0 ? Math.round(d.drop_sum / d.changed) : 0;
+                  const avgRise = hasRise && d.changed > 0 ? Math.round(d.rise_sum / d.changed) : 0;
                   return (
-                    <div style={{ background: COLORS.bg, border: `1px solid ${COLORS.secondary}`, borderRadius: 8, padding: 12, ...FONT.small, color: COLORS.textMain }}>
-                      <div style={{ fontWeight: 600, color: COURSE_COLORS[d.course_name] }}>{d.course_name}</div>
-                      <div>D-{d.d_day} · {fmtMan(d.price)}</div>
-                      <div style={{ marginTop: 4 }}>
-                        슬롯 <strong>{d.count}</strong>건
-                        {d.promo > 0 && <span style={{ color: EVENT_COLORS['특가부착'] }}> · 특가 {d.promo}</span>}
-                        {d.changed > 0 && <span style={{ color: SEVERITY_COLORS.warning }}> · 변동 {d.changed}</span>}
-                      </div>
+                    <div style={{ background: COLORS.bg, border: `1px solid ${(hasDrop || hasRise) ? '#FFFFFF' : COLORS.secondary}`, borderRadius: 8, padding: 12, ...FONT.small, color: COLORS.textMain, minWidth: 160 }}>
+                      <div style={{ fontWeight: 600, color: COURSE_COLORS[d.course_name], marginBottom: 4 }}>{d.course_name}</div>
+                      <div>D-{d.d_day} · {fmtMan(d.price)} · <strong>{d.count}</strong>슬롯</div>
+                      {d.promo > 0 && (
+                        <div style={{ color: EVENT_COLORS['특가부착'], marginTop: 3 }}>🏷️ 특가 {d.promo}건</div>
+                      )}
+                      {(hasDrop || hasRise) && (
+                        <div style={{ marginTop: 6, padding: '6px 8px', background: '#FFFFFF12', borderRadius: 6, borderLeft: '3px solid #FFFFFF' }}>
+                          <div style={{ fontWeight: 600, color: '#FFFFFF', marginBottom: 3 }}>✦ 가격 변동 {d.changed}건</div>
+                          {hasDrop && (
+                            <div style={{ color: '#FCA5A5' }}>
+                              📉 평균 하락 {fmtMan(avgDrop)} ({d.changed > 0 ? Math.round(avgDrop / (d.price + avgDrop) * 100) : 0}%)
+                            </div>
+                          )}
+                          {hasRise && (
+                            <div style={{ color: '#6EE7B7' }}>
+                              📈 평균 인상 {fmtMan(avgRise)} (+{d.changed > 0 ? Math.round(avgRise / (d.price - avgRise) * 100) : 0}%)
+                            </div>
+                          )}
+                          {d.ghost > 0 && (
+                            <div style={{ color: '#FBBF24', marginTop: 3, fontSize: 11 }}>
+                              👻 {d.ghost}건 소진됨 (인하 후 판매 완료)
+                            </div>
+                          )}
+                          {d.tee_times && d.tee_times.length > 0 && (
+                            <div style={{ marginTop: 5, borderTop: '1px solid #FFFFFF22', paddingTop: 4 }}>
+                              <div style={{ fontSize: 10, color: COLORS.textMuted, marginBottom: 2 }}>변동 티업시간:</div>
+                              {d.tee_times.slice(0, 8).map((t, i) => (
+                                <div key={i} style={{ fontSize: 10, color: t.ghost ? '#FBBF24' : '#E0F2FE', display: 'flex', gap: 4, alignItems: 'center' }}>
+                                  <span style={{ fontFamily: 'monospace' }}>{t.time}</span>
+                                  {t.prev && <span>{fmtMan(t.prev)}→{fmtMan(t.curr)}</span>}
+                                  {t.ghost && <span>👻</span>}
+                                </div>
+                              ))}
+                              {d.tee_times.length > 8 && <div style={{ fontSize: 10, color: COLORS.textMuted }}>+{d.tee_times.length - 8}건 더...</div>}
+                            </div>
+                          )}
+                        </div>
+                      )}
                     </div>
                   );
                 }
@@ -872,6 +942,16 @@ const Tab4 = ({ context, metadata }) => {
                                 r={1.2} fill="#FFFFFF" fillOpacity={0.7 - si * 0.12}
                                 filter={`url(#glow_${uid})`} />
                             ))}
+                            {/* 👻 소진 슬롯 표시: 점선 X 마커 */}
+                            {payload.ghost > 0 && (
+                              <>
+                                <circle cx={cx} cy={cy} r={r + 6} fill="none"
+                                  stroke="#FBBF24" strokeWidth={1.2} strokeDasharray="3 2"
+                                  strokeOpacity={0.7} />
+                                <text x={cx} y={cy - r - 8} textAnchor="middle"
+                                  fill="#FBBF24" fontSize={8} fontWeight="600" fillOpacity={0.9}>소진{payload.ghost}</text>
+                              </>
+                            )}
                           </>
                         ) : (
                           /* 일반 버블 — 변동 없음 */
@@ -897,7 +977,7 @@ const Tab4 = ({ context, metadata }) => {
             <span>● 크기 = 슬롯 수</span>
             <span style={{ color: '#E0F2FE' }}>✦ 흰색 빔↑ = 가격 하락</span>
             <span style={{ color: '#D1FAE5' }}>✦ 연초록 빔↓ = 가격 인상</span>
-            <span style={{ color: '#FFFFFF' }}>◎ 발광 = 가격 변동</span>
+            <span style={{ color: '#FBBF24' }}>⊙ 점선 = 인하 후 소진</span>
           </div>
         </div>
       )}
@@ -920,10 +1000,10 @@ const Tab4 = ({ context, metadata }) => {
       )}
 
       {/* D. 가격 변동 이벤트 테이블 */}
-      <SectionTitle title="가격 변동 이벤트" icon="📋" />
-      <div style={{ overflowX: 'auto', background: COLORS.cardBg, borderRadius: 10, border: `1px solid ${COLORS.secondary}` }}>
+      <SectionTitle title={`가격 변동 이벤트 (${(tab4.price_events || []).length}건)`} icon="📋" />
+      <div style={{ overflowX: 'auto', maxHeight: 500, overflowY: 'auto', background: COLORS.cardBg, borderRadius: 10, border: `1px solid ${COLORS.secondary}` }}>
         <table style={{ width: '100%', borderCollapse: 'collapse', ...FONT.table }}>
-          <thead>
+          <thead style={{ position: 'sticky', top: 0, background: COLORS.cardBg, zIndex: 1 }}>
             <tr style={{ borderBottom: `2px solid ${COLORS.secondary}` }}>
               {['골프장', '코스', '이벤트', '변동', '경기일', '시간'].map(h => (
                 <th key={h} style={{ padding: '12px 14px', textAlign: 'left', color: COLORS.textSecondary, ...FONT.tableHeader }}>{h}</th>
@@ -931,7 +1011,7 @@ const Tab4 = ({ context, metadata }) => {
             </tr>
           </thead>
           <tbody>
-            {(tab4.price_events || []).slice(0, 15).map((evt, idx) => (
+            {(tab4.price_events || []).map((evt, idx) => (
               <tr key={idx} style={{ borderBottom: `1px solid ${COLORS.secondary}22` }}>
                 <td style={{ padding: '12px 14px' }}><CourseBadge name={evt.course_name} small /></td>
                 <td style={{ padding: '12px 14px', color: COLORS.textSecondary }}>{evt.course_sub}</td>
@@ -967,22 +1047,69 @@ const Tab5 = ({ context, metadata }) => {
   const marketEvents = allEvents.filter(e => e.event_type === '인하' || e.event_type === '인상');
   const promoEvents = allEvents.filter(e => e.event_type === '특가부착' || e.event_type === '특가해제');
   const displayEvents = discountView === 'market' ? marketEvents : discountView === 'promo' ? promoEvents : allEvents;
+  const eff = tab5a.effectiveness || {};
+
+  const OUTCOME_STYLE = {
+    consumed: { label: '소진', color: '#10B981', bg: '#10B98120', icon: '✅' },
+    waiting:  { label: '대기', color: '#3B82F6', bg: '#3B82F620', icon: '⏳' },
+    expired:  { label: '만료', color: '#64748B', bg: '#64748B20', icon: '⏱️' },
+  };
 
   return (
     <div>
-      {tab5a.data_limitation && <InfoBanner text={tab5a.data_limitation} level="warning" />}
-      <InfoBanner text="🔻 시장 반응 = 수요에 의해 실제 가격이 변동된 것 | 🏷️ 특가 프로모션 = 골프장이 처음부터 할인 라벨을 붙인 것. 이 둘은 의미가 완전히 다릅니다." />
+      <InfoBanner text="🔻 시장 반응 = 수요에 의해 실제 가격이 변동된 것 | 🏷️ 특가 프로모션 = 골프장이 처음부터 할인 라벨을 붙인 것" />
 
-      {/* B. 골프장별 할인 현황 카드 */}
-      <SectionTitle title="골프장별 할인 현황" icon="🏷️" />
-      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))', gap: 14, marginBottom: 28 }}>
-        {(tab5a.course_summary || []).map((cs, idx) => (
-          <div key={idx} style={{ background: COLORS.cardBg, borderRadius: 10, padding: 18, border: `1px solid ${COLORS.secondary}` }}>
-            <CourseBadge name={cs.course_name} small />
-            <div style={{ fontSize: 28, fontWeight: 700, color: COLORS.textBright, marginTop: 10 }}>{cs.event_count}<span style={{ ...FONT.small, color: COLORS.textMuted, marginLeft: 4 }}>건</span></div>
-            <div style={{ color: COLORS.textSecondary, ...FONT.small, marginTop: 6 }}>평균 할인 {fmtPct(cs.avg_discount_pct)} · 최대 {fmtPct(cs.max_discount_pct)}</div>
-          </div>
-        ))}
+      {/* A. 인하 효과 요약 */}
+      <SectionTitle title="인하 효과 분석" icon="📊" />
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(160px, 1fr))', gap: 14, marginBottom: 28 }}>
+        <div style={{ background: COLORS.cardBg, borderRadius: 10, padding: 18, border: `1px solid ${COLORS.secondary}` }}>
+          <div style={{ ...FONT.small, color: COLORS.textMuted }}>전체 인하/특가</div>
+          <div style={{ fontSize: 32, fontWeight: 800, color: COLORS.textBright, marginTop: 6 }}>{eff.total_events || 0}<span style={{ ...FONT.small, color: COLORS.textMuted, marginLeft: 4 }}>건</span></div>
+        </div>
+        <div style={{ background: COLORS.cardBg, borderRadius: 10, padding: 18, border: '1px solid #10B98140' }}>
+          <div style={{ ...FONT.small, color: '#10B981' }}>✅ 소진 (인하→판매)</div>
+          <div style={{ fontSize: 32, fontWeight: 800, color: '#10B981', marginTop: 6 }}>{eff.consumed || 0}<span style={{ ...FONT.small, color: COLORS.textMuted, marginLeft: 4 }}>건</span></div>
+        </div>
+        <div style={{ background: COLORS.cardBg, borderRadius: 10, padding: 18, border: '1px solid #3B82F640' }}>
+          <div style={{ ...FONT.small, color: '#3B82F6' }}>⏳ 대기 (아직 미판매)</div>
+          <div style={{ fontSize: 32, fontWeight: 800, color: '#3B82F6', marginTop: 6 }}>{eff.waiting || 0}<span style={{ ...FONT.small, color: COLORS.textMuted, marginLeft: 4 }}>건</span></div>
+        </div>
+        <div style={{ background: COLORS.cardBg, borderRadius: 10, padding: 18, border: '1px solid #F59E0B40' }}>
+          <div style={{ ...FONT.small, color: '#F59E0B' }}>인하 후 소진율</div>
+          <div style={{ fontSize: 32, fontWeight: 800, color: '#F59E0B', marginTop: 6 }}>{eff.consumption_rate != null ? eff.consumption_rate + '%' : '-'}</div>
+          <div style={{ ...FONT.tiny, color: COLORS.textMuted, marginTop: 4 }}>만료 {eff.expired || 0}건 제외</div>
+        </div>
+      </div>
+
+      {/* B. 골프장별 할인 현황 카드 (소진율 포함) */}
+      <SectionTitle title="골프장별 인하 효과" icon="🏷️" />
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(240px, 1fr))', gap: 14, marginBottom: 28 }}>
+        {(tab5a.course_summary || []).map((cs, idx) => {
+          const act = (cs.consumed || 0) + (cs.waiting || 0);
+          return (
+            <div key={idx} style={{ background: COLORS.cardBg, borderRadius: 10, padding: 18, border: `1px solid ${COLORS.secondary}` }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                <CourseBadge name={cs.course_name} small />
+                {cs.consumption_rate != null && (
+                  <span style={{ ...FONT.small, fontWeight: 700, color: cs.consumption_rate > 50 ? '#10B981' : cs.consumption_rate > 0 ? '#F59E0B' : '#64748B' }}>
+                    소진 {cs.consumption_rate}%
+                  </span>
+                )}
+              </div>
+              <div style={{ fontSize: 28, fontWeight: 700, color: COLORS.textBright, marginTop: 10 }}>
+                {cs.event_count}<span style={{ ...FONT.small, color: COLORS.textMuted, marginLeft: 4 }}>건</span>
+              </div>
+              <div style={{ color: COLORS.textSecondary, ...FONT.small, marginTop: 6 }}>
+                평균 할인 {fmtPct(cs.avg_discount_pct)} · 최대 {fmtPct(cs.max_discount_pct)}
+              </div>
+              <div style={{ display: 'flex', gap: 8, marginTop: 8, ...FONT.tiny }}>
+                <span style={{ color: '#10B981' }}>✅{cs.consumed || 0}</span>
+                <span style={{ color: '#3B82F6' }}>⏳{cs.waiting || 0}</span>
+                <span style={{ color: '#64748B' }}>⏱️{cs.expired || 0}</span>
+              </div>
+            </div>
+          );
+        })}
       </div>
 
       {/* C. D-day별 특가 vs 정가 */}
@@ -1023,17 +1150,17 @@ const Tab5 = ({ context, metadata }) => {
           }}>{opt.label} ({opt.count})</button>
         ))}
       </div>
-      <div style={{ overflowX: 'auto', background: COLORS.cardBg, borderRadius: 10, border: `1px solid ${COLORS.secondary}` }}>
+      <div style={{ overflowX: 'auto', maxHeight: 500, overflowY: 'auto', background: COLORS.cardBg, borderRadius: 10, border: `1px solid ${COLORS.secondary}` }}>
         <table style={{ width: '100%', borderCollapse: 'collapse', ...FONT.table }}>
-          <thead>
+          <thead style={{ position: 'sticky', top: 0, background: COLORS.cardBg, zIndex: 1 }}>
             <tr style={{ borderBottom: `2px solid ${COLORS.secondary}` }}>
-              {['골프장', '코스', '유형', '이벤트', '할인율', '할인액', '경기일', '시간'].map(h => (
+              {['골프장', '코스', '유형', '이벤트', '할인율', '할인액', '경기일', '시간', '상태'].map(h => (
                 <th key={h} style={{ padding: '12px 14px', textAlign: 'left', color: COLORS.textSecondary, ...FONT.tableHeader }}>{h}</th>
               ))}
             </tr>
           </thead>
           <tbody>
-            {displayEvents.slice(0, 20).map((evt, idx) => {
+            {displayEvents.map((evt, idx) => {
               const isMarket = evt.event_type === '인하' || evt.event_type === '인상';
               return (
                 <tr key={idx} style={{ borderBottom: `1px solid ${COLORS.secondary}22` }}>
@@ -1054,6 +1181,16 @@ const Tab5 = ({ context, metadata }) => {
                   <td style={{ padding: '12px 14px', color: COLORS.textSecondary }}>{fmt(evt.discount_amt)}원</td>
                   <td style={{ padding: '12px 14px', color: COLORS.textSecondary }}>{evt.play_date}</td>
                   <td style={{ padding: '12px 14px', color: COLORS.textMuted }}>{evt.tee_time}</td>
+                  <td style={{ padding: '12px 14px' }}>
+                    {evt.outcome && (() => {
+                      const s = OUTCOME_STYLE[evt.outcome];
+                      return s ? (
+                        <span style={{ padding: '2px 8px', borderRadius: 10, ...FONT.tiny, fontWeight: 600, background: s.bg, color: s.color }}>
+                          {s.icon} {s.label}
+                        </span>
+                      ) : <span style={{ color: COLORS.textMuted }}>-</span>;
+                    })()}
+                  </td>
                 </tr>
               );
             })}
