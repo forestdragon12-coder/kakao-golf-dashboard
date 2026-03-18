@@ -85,9 +85,9 @@ def parse_args():
     )
     parser.add_argument(
         "--source",
-        choices=["kakao", "teescanner", "both", "auto"],
+        choices=["kakao", "teescanner", "both", "auto", "official"],
         default="kakao",
-        help="데이터 소스: kakao(기본) | teescanner | both(병렬) | auto(카카오 우선, 없으면 티스캐너)",
+        help="데이터 소스: kakao(기본) | teescanner | both(병렬) | auto(카카오 우선, 없으면 티스캐너) | official(공식HP 직접)",
     )
     return parser.parse_args()
 
@@ -129,6 +129,56 @@ async def main():
             return
         await init_db()
         await generate_reports(args.report_date, args.report_type)
+        return
+
+    # ── 공식 홈페이지 직접 수집 모드 ──
+    if args.source == "official":
+        await init_db()
+        from scraper.official_web_scraper import OfficialWebScraper, SITES
+        from scraper.kjcc_scraper import KjccScraper
+        from scraper.happiness_scraper import HappinessScraper
+        from scraper.purunsol_scraper import PurunsolScraper
+        from scraper.eodeungsan_scraper import EodeungsanScraper
+        official_courses = list(SITES.keys()) + ["광주CC", "해피니스", "푸른솔장성", "어등산"]
+        target_courses = args.courses if args.courses else official_courses
+        logger.info(f"[공식HP] {target_courses} 수집 시작")
+        run_id = await start_run()
+        all_rows = []
+        # ReservationController 계열 (르오네뜨, 베르힐)
+        rc_targets = [c for c in target_courses if c in SITES]
+        if rc_targets:
+            scraper = OfficialWebScraper()
+            all_rows.extend(await scraper.collect_courses(rc_targets))
+        # 광주CC (SSR)
+        if "광주CC" in target_courses:
+            kjcc = KjccScraper()
+            all_rows.extend(await kjcc.collect_course())
+        # 해피니스 (SSR)
+        if "해피니스" in target_courses:
+            happiness = HappinessScraper()
+            all_rows.extend(await happiness.collect_course())
+        # 푸른솔장성 (AJAX)
+        if "푸른솔장성" in target_courses:
+            purunsol = PurunsolScraper()
+            all_rows.extend(await purunsol.collect_course())
+        # 어등산 (REST API)
+        if "어등산" in target_courses:
+            eodeungsan = EodeungsanScraper()
+            all_rows.extend(await eodeungsan.collect_course())
+        by_course = {}
+        for r in all_rows:
+            by_course.setdefault(r["course_name"], []).append(r)
+        total = 0
+        for cn, cr in by_course.items():
+            cid = await get_or_create_course(cn)
+            for r in cr: r["course_id"] = cid; r["crawl_run_id"] = run_id
+            ins = await insert_snapshots(cr)
+            summaries = compute_daily_summary(cr)
+            await upsert_daily_summary(summaries)
+            total += ins
+            logger.info(f"  [{cn}] {ins}개")
+        await finish_run(run_id, "success", total)
+        console.print(f"[bold green]공식HP 수집 완료: {total}개[/bold green]")
         return
 
     # ── 티스캐너 전용 모드 ──
