@@ -38,7 +38,16 @@ async def aggregate_daily(report_date: str = None) -> int:
         )
 
         # ── (course_name, play_date, part_type, membership_type) 그룹 집계
+        #    시간별 수집 시 같은 슬롯 중복 방지: 하루 최신 스냅샷만 집계
         agg_query = """
+            WITH latest_snap AS (
+                SELECT *, ROW_NUMBER() OVER (
+                    PARTITION BY COALESCE(slot_identity_key, slot_group_key)
+                    ORDER BY collected_at DESC
+                ) AS _rn
+                FROM tee_time_snapshots
+                WHERE collected_date = ?
+            )
             SELECT
                 course_name,
                 play_date,
@@ -56,8 +65,8 @@ async def aggregate_daily(report_date: str = None) -> int:
                 SUM(CASE WHEN price_type LIKE '%카트비%' THEN 1 ELSE 0 END) AS cart_cnt,
                 SUM(CASE WHEN pax_condition LIKE '3인%' THEN 1 ELSE 0 END) AS pax3_cnt,
                 MAX(CASE WHEN promo_flag = 1           THEN 1 ELSE 0 END) AS disc_flag
-            FROM tee_time_snapshots
-            WHERE collected_date = ?
+            FROM latest_snap
+            WHERE _rn = 1
               AND price_krw IS NOT NULL
             GROUP BY course_name, play_date, part_type, membership_type
         """

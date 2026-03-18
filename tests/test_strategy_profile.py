@@ -8,6 +8,19 @@ from analytics import strategy_profile
 from db import database
 
 
+def _run_async(coro):
+    """asyncio.run() 대체: 이미 실행 중인 이벤트 루프가 있어도 동작"""
+    try:
+        asyncio.get_running_loop()
+        loop = asyncio.new_event_loop()
+        try:
+            return loop.run_until_complete(coro)
+        finally:
+            loop.close()
+    except RuntimeError:
+        return asyncio.run(coro)
+
+
 class StrategyProfileTests(unittest.TestCase):
     def test_build_strategy_profiles_returns_stable_schema_with_sparse_data(self):
         async def scenario():
@@ -49,7 +62,7 @@ class StrategyProfileTests(unittest.TestCase):
                     self.assertIn(profile["discount_dependency"]["label"], {"높음", "보통", "낮음", "판단보류"})
                     self.assertIn(profile["discount_amplification"]["label"], {"높음", "보통", "낮음", "판단보류"})
 
-        asyncio.run(scenario())
+        _run_async(scenario())
 
     def test_build_strategy_profiles_uses_market_comparison_when_competitors_exist(self):
         async def scenario():
@@ -108,7 +121,7 @@ class StrategyProfileTests(unittest.TestCase):
                     self.assertIn(amplification["confidence"], {"low", "medium"})
                     self.assertIn(amplification["label"], {"높음", "보통", "낮음", "판단보류"})
 
-        asyncio.run(scenario())
+        _run_async(scenario())
 
 
 if __name__ == "__main__":

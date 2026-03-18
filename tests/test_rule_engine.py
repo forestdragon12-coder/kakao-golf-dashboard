@@ -8,6 +8,19 @@ from analytics import rule_engine
 from db import database
 
 
+def _run_async(coro):
+    """asyncio.run() 대체: 이미 실행 중인 이벤트 루프가 있어도 동작"""
+    try:
+        asyncio.get_running_loop()
+        loop = asyncio.new_event_loop()
+        try:
+            return loop.run_until_complete(coro)
+        finally:
+            loop.close()
+    except RuntimeError:
+        return asyncio.run(coro)
+
+
 class RuleEngineTests(unittest.TestCase):
     def test_evaluate_rules_detects_core_signals(self):
         async def scenario():
@@ -79,7 +92,7 @@ class RuleEngineTests(unittest.TestCase):
                     self.assertTrue(any(item["action"] == "공급증가주의" for item in summary["actions"]))
                     self.assertTrue(all("priority_rank" in item for item in summary["actions"]))
 
-        asyncio.run(scenario())
+        _run_async(scenario())
 
 
 if __name__ == "__main__":

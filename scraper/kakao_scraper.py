@@ -29,7 +29,9 @@ class KakaoGolfScraper:
 
     def __init__(self):
         self.today = date.today()
+        now = datetime.now()
         self.collected_date = self.today.isoformat()
+        self.collected_at = now.strftime("%Y-%m-%dT%H:%M:00")  # 분 단위 (매 수집 고유)
         self.debug_courses = {"광주CC", "르오네뜨"}
 
     # ─────────────────────────────────────────
@@ -242,7 +244,19 @@ class KakaoGolfScraper:
         if course_name in self.debug_courses and play_date == (self.today + timedelta(days=1)):
             await self._dump_debug(page, course_name, "teetimes_page_regression")
 
-        # 행 빌드
+        return self._build_rows(tee_items, course_name, course_id, run_id, play_date)
+
+    # ─────────────────────────────────────────
+    # 파싱된 아이템 → DB row dict 빌드 (공용)
+    # ─────────────────────────────────────────
+    def _build_rows(
+        self,
+        tee_items: list[dict],
+        course_name: str,
+        course_id: int,
+        run_id: int,
+        play_date: date,
+    ) -> list[dict]:
         rows = []
         d_day = (play_date - self.today).days
         for item in tee_items:
@@ -268,6 +282,7 @@ class KakaoGolfScraper:
                 "course_id":       course_id,
                 "course_name":     course_name,
                 "collected_date":  self.collected_date,
+                "collected_at":    self.collected_at,
                 "play_date":       play_date.isoformat(),
                 "tee_time":        item["tee_time"],
                 "price_krw":       item.get("price_krw"),
@@ -285,14 +300,14 @@ class KakaoGolfScraper:
                 "course_variant":  course_variant,
                 "slot_identity_key": slot_identity_key,
                 "slot_identity_version": 1,
-                "slot_observation_key": make_slot_observation_key(slot_identity_key, self.collected_date),
+                "slot_observation_key": make_slot_observation_key(slot_identity_key, self.collected_at),
                 "slot_status":     "available",
                 "status_reason":   "observed_in_listing",
                 "visible_flag":    1,
                 "inventory_observed_flag": 1,
-                "listed_price_krw": item.get("price_krw"),
-                "normal_price_krw": None,
-                "sale_price_krw":  item.get("price_krw"),
+                "listed_price_krw": item.get("listed_price_krw") or item.get("price_krw"),
+                "normal_price_krw": item.get("normal_price_krw"),
+                "sale_price_krw":  item.get("sale_price_krw") or item.get("price_krw"),
                 "price_badge":     item.get("promo_text"),
                 "previous_price_krw": None,
                 "price_changed_flag": 0,
@@ -300,12 +315,10 @@ class KakaoGolfScraper:
                 "price_change_delta_pct": None,
                 "price_change_count_7d": 0,
                 "first_discount_dday": d_day if item.get("promo_flag", 0) else None,
-                # hash_key: course_sub 포함 → 동일 시간 복수 코스 충돌 방지
                 "hash_key": make_hash(
-                    course_name, self.collected_date,
+                    course_name, self.collected_at,
                     play_date.isoformat(), item["tee_time"], cs
                 ),
-                # slot_group_key: collected_date 제외 → 날짜 간 동일 슬롯 추적용
                 "slot_group_key": make_slot_key(
                     course_name, play_date.isoformat(),
                     item["tee_time"], cs

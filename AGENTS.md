@@ -14,7 +14,7 @@
 
 ## Reporting
 
-- Use `/Users/forestdragon/Desktop/kakao_golf/REPORT_METRIC_WRITING_POLICY.md` as the fixed source of truth for report metric calculation labels, change wording, and per-line interpretation text.
+- Use `/Users/forestdragon/kakao_golf/REPORT_METRIC_WRITING_POLICY.md` as the fixed source of truth for report metric calculation labels, change wording, and per-line interpretation text.
 - In report-facing output, every key metric must include both the numeric change and its plain-language meaning.
 - Do not expose internal payload key names in final report prose.
 

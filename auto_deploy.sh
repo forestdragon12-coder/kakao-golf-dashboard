@@ -8,7 +8,7 @@
 #   bash auto_deploy.sh --crawl  # 크롤링부터 전체 실행
 #
 # crontab 자동화 (매일 오전 6시):
-#   0 6 * * * cd ~/Desktop/kakao_golf && bash auto_deploy.sh --crawl >> logs/auto_deploy.log 2>&1
+#   0 6 * * * cd ~/kakao_golf && bash auto_deploy.sh --crawl >> logs/auto_deploy.log 2>&1
 # ──────────────────────────────────────────────
 
 set -e

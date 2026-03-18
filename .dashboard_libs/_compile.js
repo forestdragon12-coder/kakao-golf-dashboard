@@ -1,4 +1,4 @@
-process.chdir('/sessions/hopeful-pensive-allen/mnt/kakao_golf/.dashboard_libs');
+process.chdir('/Users/forestdragon/kakao_golf/.dashboard_libs');
 
 const babel = require('@babel/core');
 const fs = require('fs');

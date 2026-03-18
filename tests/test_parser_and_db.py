@@ -8,6 +8,19 @@ from db import database
 from scraper.kakao_scraper import KakaoGolfScraper
 
 
+def _run_async(coro):
+    """asyncio.run() 대체: 이미 실행 중인 이벤트 루프가 있어도 동작"""
+    try:
+        asyncio.get_running_loop()
+        loop = asyncio.new_event_loop()
+        try:
+            return loop.run_until_complete(coro)
+        finally:
+            loop.close()
+    except RuntimeError:
+        return asyncio.run(coro)
+
+
 class ParserTests(unittest.TestCase):
     def test_parse_blocks_extracts_price_promo_and_membership(self):
         sample = """06:54
@@ -69,7 +82,7 @@ class DatabaseTests(unittest.TestCase):
                     self.assertEqual(first, 1)
                     self.assertEqual(second, 0)
 
-        asyncio.run(scenario())
+        _run_async(scenario())
 
     def test_init_db_backfills_missing_slot_group_key(self):
         async def scenario():
@@ -106,7 +119,7 @@ class DatabaseTests(unittest.TestCase):
                     self.assertEqual(row[2], "available")
                     self.assertEqual(row[3], 85000)
 
-        asyncio.run(scenario())
+        _run_async(scenario())
 
 
 if __name__ == "__main__":

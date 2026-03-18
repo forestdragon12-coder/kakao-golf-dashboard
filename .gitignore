@@ -5,3 +5,9 @@ __pycache__/
 logs/
 reports/
 data/
+raw/
+dashboard_archive/
+service-account-key.json
+.claude/worktrees/
+.firebase/
+node_modules/

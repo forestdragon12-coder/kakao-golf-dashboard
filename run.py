@@ -19,7 +19,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 
 from config.courses import COURSES
 from db.database import init_db, get_or_create_course, start_run, finish_run, insert_snapshots, upsert_daily_summary
-from scraper.kakao_scraper import KakaoGolfScraper, COURSE_DELAY
+from scraper.kakao_scraper import COURSE_DELAY
 from scraper.calculator import compute_daily_summary
 from analytics.price_change_detector import detect_price_changes, get_change_summary
 from analytics.price_response_detector import detect_price_responses
@@ -67,6 +67,28 @@ def parse_args():
         action="store_true",
         help="수집 시 Playwright 브라우저 창을 표시합니다. 기본값은 headless 백그라운드 실행입니다.",
     )
+    parser.add_argument(
+        "--courses",
+        nargs="+",
+        default=None,
+        help="특정 골프장만 수집 (예: --courses 광주CC 골드레이크)",
+    )
+    parser.add_argument(
+        "--skip-analysis",
+        action="store_true",
+        help="수집만 하고 분석/빌드/배포 스킵 (오픈 시간 수집용)",
+    )
+    parser.add_argument(
+        "--skip-ai",
+        action="store_true",
+        help="AI 분석 스킵 (LLM 보고서 + TAB7 AI 진단 제외, 나머지 분석/빌드/배포는 실행)",
+    )
+    parser.add_argument(
+        "--source",
+        choices=["kakao", "teescanner", "both", "auto"],
+        default="kakao",
+        help="데이터 소스: kakao(기본) | teescanner | both(병렬) | auto(카카오 우선, 없으면 티스캐너)",
+    )
     return parser.parse_args()
 
 
@@ -109,6 +131,75 @@ async def main():
         await generate_reports(args.report_date, args.report_type)
         return
 
+    # ── 티스캐너 전용 모드 ──
+    if args.source == "teescanner":
+        await init_db()
+        target_courses = args.courses if args.courses else COURSES
+        logger.info(f"[티스캐너] {len(target_courses)}개 골프장 수집")
+        run_id = await start_run()
+        from scraper.teescanner_scraper import TeescannerScraper
+        ts = TeescannerScraper()
+        rows = ts.collect_courses(target_courses)
+        by_course = {}
+        for r in rows:
+            by_course.setdefault(r["course_name"], []).append(r)
+        total = 0
+        for cn in target_courses:
+            cr = by_course.get(cn, [])
+            if cr:
+                cid = await get_or_create_course(cn)
+                for r in cr: r["course_id"] = cid; r["crawl_run_id"] = run_id
+                ins = await insert_snapshots(cr)
+                summaries = compute_daily_summary(cr)
+                await upsert_daily_summary(summaries)
+                total += ins
+                logger.info(f"  [{cn}] {ins}개")
+        await finish_run(run_id, "success", total)
+        console.print(f"[bold green]티스캐너 수집 완료: {total}개[/bold green]")
+        return
+
+    # ── both 모드: 카카오 + 티스캐너 병렬 ──
+    if args.source == "both":
+        await init_db()
+        target_courses = args.courses if args.courses else COURSES
+        logger.info(f"카카오 + 티스캐너 병렬 수집: {target_courses}")
+
+        async def _kakao():
+            a = argparse.Namespace(**vars(args)); a.source = "kakao"
+            # 카카오 수집은 기존 방식 사용 (아래 코드 재활용 불가 → 별도 실행)
+            import subprocess
+            cmd = [sys.executable, __file__, "--source", "kakao", "--skip-analysis", "--courses"] + list(target_courses)
+            p = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
+            return p.returncode
+
+        async def _ts():
+            a = argparse.Namespace(**vars(args)); a.source = "teescanner"; a.courses = target_courses
+            from scraper.teescanner_scraper import TeescannerScraper
+            ts = TeescannerScraper()
+            rows = ts.collect_courses(target_courses)
+            rid = await start_run()
+            total = 0
+            by_c = {}
+            for r in rows: by_c.setdefault(r["course_name"], []).append(r)
+            for cn, cr in by_c.items():
+                cid = await get_or_create_course(cn)
+                for r in cr: r["course_id"] = cid; r["crawl_run_id"] = rid
+                ins = await insert_snapshots(cr)
+                summaries = compute_daily_summary(cr)
+                await upsert_daily_summary(summaries)
+                total += ins
+            await finish_run(rid, "success", total)
+            return total
+
+        k_task = asyncio.create_task(asyncio.to_thread(_kakao))
+        ts_result = await _ts()
+        k_result = await k_task
+        console.print(f"[bold green]병렬 수집 완료 (티스캐너: {ts_result}건)[/bold green]")
+        return
+
+    # ── auto 모드: 카카오 우선 → 실패 시 티스캐너 ──
+    # (수집 후 0건인 골프장만 티스캐너 폴백 — 아래 기존 카카오 수집 후 처리)
+
     logger.info("=" * 50)
     logger.info("카카오골프 티타임 수집 시작")
     logger.info(f"대상 골프장: {COURSES}")
@@ -144,9 +235,11 @@ async def main():
                 timezone_id="Asia/Seoul",
             )
             page = await context.new_page()
-            scraper = KakaoGolfScraper()
+            from scraper.kakao_api_scraper import KakaoApiScraper
+            scraper = KakaoApiScraper()
 
-            for course_name in COURSES:
+            target_courses = args.courses if args.courses else COURSES
+            for course_name in target_courses:
                 logger.info(f"── [{course_name}] 수집 시작")
                 try:
                     course_id = await get_or_create_course(course_name)
@@ -200,7 +293,59 @@ async def main():
     console.print(f"\n[bold green]총 {total_rows}개 티타임 저장 완료[/bold green]")
     logger.info(f"수집 완료. 총 {total_rows}개 저장.")
 
-    # ── 분석 파이프라인 (수집 성공 시 실행)
+    # ── auto 모드: 카카오 0건 골프장 → 티스캐너 폴백 ──
+    if args.source == "auto":
+        failed_names = [r["name"] for r in results if r["count"] == 0]
+        if failed_names:
+            try:
+                from scraper.teescanner_scraper import TeescannerScraper
+                ts = TeescannerScraper()
+                ts_all = ts.fetch_all_courses()
+                ts_names = {c["golfclub_name"] for c in ts_all}
+                ts_map = {}
+                for fn in failed_names:
+                    if fn in ts_names:
+                        ts_map[fn] = fn
+                    else:
+                        matches = [n for n in ts_names if fn in n or n.replace("(P)","").replace("(P9)","") == fn]
+                        if matches: ts_map[fn] = matches[0]
+                if ts_map:
+                    logger.info(f"[AUTO 폴백] 티스캐너로 {len(ts_map)}개 재시도: {list(ts_map.keys())}")
+                    ts_target = list(ts_map.values())
+                    rows = ts.collect_courses(ts_target)
+                    reverse = {v: k for k, v in ts_map.items()}
+                    for r in rows:
+                        if r["course_name"] in reverse: r["course_name"] = reverse[r["course_name"]]
+                    if rows:
+                        ts_rid = await start_run()
+                        by_c = {}
+                        for r in rows: by_c.setdefault(r["course_name"], []).append(r)
+                        for cn, cr in by_c.items():
+                            cid = await get_or_create_course(cn)
+                            for r in cr: r["course_id"] = cid; r["crawl_run_id"] = ts_rid
+                            ins = await insert_snapshots(cr)
+                            summaries = compute_daily_summary(cr)
+                            await upsert_daily_summary(summaries)
+                            total_rows += ins
+                            logger.info(f"  [티스캐너→{cn}] {ins}개")
+                        await finish_run(ts_rid, "success", sum(len(v) for v in by_c.values()))
+            except Exception as e:
+                logger.warning(f"[AUTO 폴백] 티스캐너 실패: {e}")
+
+    # ── 분석 파이프라인 (수집 성공 시 실행, --skip-analysis 시 경량 분석만)
+    if args.skip_analysis:
+        if total_rows > 0:
+            try:
+                from analytics.hourly_analyzer import build_hourly_summary_from_db, detect_hourly_price_changes
+                collected_at = scraper.collected_at
+                hs = await build_hourly_summary_from_db(collected_at)
+                hpc = await detect_hourly_price_changes(collected_at)
+                if hpc > 0:
+                    logger.info(f"시간별 가격변동 {hpc}건 감지")
+            except Exception as e:
+                logger.debug(f"시간별 분석 오류: {e}")
+        logger.info(f"오픈 시간 수집 완료 ({total_rows}건) — 경량 분석")
+        return
     if total_rows > 0:
         logger.info("=" * 50)
         logger.info("분석 파이프라인 시작")
@@ -319,7 +464,9 @@ async def main():
         except Exception as e:
             logger.error(f"룰 엔진 오류: {e}")
 
-        if _reports_enabled():
+        if args.skip_ai:
+            logger.info("--skip-ai: LLM 보고서 생성 스킵")
+        elif _reports_enabled():
             current_report_date = datetime.now().date().isoformat()
             prev_report_date = (datetime.now().date() - timedelta(days=1)).isoformat()
             prev_agg_summary = await get_aggregation_summary(prev_report_date)
@@ -351,16 +498,36 @@ async def main():
         # ── 대시보드 빌드 (V5)
         try:
             from build_dashboard import build_all
-            build_all()
+            build_all(skip_ai=args.skip_ai)
             logger.info("대시보드 빌드 완료")
         except Exception as e:
             logger.error(f"대시보드 빌드 오류: {e}")
 
-        # ── GitHub Pages 자동 배포
+        # ── 배포 전 테스트 실행
+        if _run_tests():
+            # ── Firebase Hosting 배포 + Storage 업로드
+            try:
+                _deploy_firebase()
+            except Exception as e:
+                logger.error(f"Firebase 배포 오류: {e}")
+        else:
+            logger.warning("테스트 실패 → Firebase 배포 스킵")
+
+        # ── 미판매 슬롯 기록
         try:
-            _deploy_github_pages()
+            from analytics.unsold_tracker import record_unsold_slots
+            unsold_count = record_unsold_slots()
+            logger.info(f"미판매 기록: {unsold_count}건")
         except Exception as e:
-            logger.error(f"GitHub Pages 배포 오류: {e}")
+            logger.error(f"미판매 기록 오류: {e}")
+
+        # ── 기상 데이터 수집
+        try:
+            from analytics.weather_collector import collect_weather
+            weather_count = collect_weather()
+            logger.info(f"기상 수집: {weather_count}건")
+        except Exception as e:
+            logger.error(f"기상 수집 오류: {e}")
 
         logger.info("분석 파이프라인 완료")
 
@@ -370,6 +537,103 @@ async def main():
     else:
         logger.warning("수집 결과 없음 → 분석 파이프라인 스킵")
         _notify_macos_error()
+
+
+def _run_tests() -> bool:
+    """배포 전 테스트 실행 (별도 프로세스). 성공 시 True, 실패 시 False."""
+    import subprocess
+    script_dir = Path(__file__).parent
+    venv_python = script_dir / "venv" / "bin" / "python"
+    python_cmd = str(venv_python) if venv_python.exists() else sys.executable
+    try:
+        result = subprocess.run(
+            [python_cmd, "-m", "pytest",
+             "tests/test_database.py",
+             "tests/test_generate_dashboard_data.py",
+             "tests/test_parser_and_db.py",
+             "tests/test_rule_engine.py",
+             "tests/test_report_payload_builder.py",
+             "tests/test_report_generator.py",
+             "tests/test_llm_report_writer.py",
+             "tests/test_strategy_profile.py",
+             "tests/test_period_reports.py",
+             "tests/test_price_response_detector.py",
+             "-q", "--tb=line", "-x"],
+            cwd=script_dir, capture_output=True, text=True, timeout=120
+        )
+        if result.returncode == 0:
+            last_line = result.stdout.strip().splitlines()[-1] if result.stdout.strip() else "OK"
+            logger.info(f"테스트 통과: {last_line}")
+            return True
+        else:
+            logger.error(f"테스트 실패:\n{result.stdout[-500:]}\n{result.stderr[-300:]}")
+            return False
+    except subprocess.TimeoutExpired:
+        logger.error("테스트 타임아웃 (300초)")
+        return False
+    except Exception as e:
+        logger.warning(f"테스트 실행 불가: {e} → 배포 계속")
+        return True
+
+
+def _find_firebase_cli() -> str | None:
+    """firebase CLI 경로 탐색 (LaunchDaemon 환경에서 PATH 누락 대비)"""
+    import shutil
+    path = shutil.which("firebase")
+    if path:
+        return path
+    # nvm / 일반적인 위치 탐색
+    candidates = [
+        Path.home() / ".nvm" / "versions",
+        Path("/usr/local/bin"),
+        Path("/opt/homebrew/bin"),
+    ]
+    for base in candidates:
+        if not base.exists():
+            continue
+        for fb in base.rglob("firebase"):
+            if fb.is_file() and os.access(fb, os.X_OK):
+                return str(fb)
+    return None
+
+
+def _deploy_firebase():
+    """Firebase Hosting 배포 + Storage 데이터 업로드"""
+    import subprocess
+
+    script_dir = Path(__file__).parent
+
+    # 1. Firebase Hosting 배포 (docs/index.html은 build_dashboard.py가 생성)
+    firebase_cmd = _find_firebase_cli()
+    if firebase_cmd:
+        try:
+            result = subprocess.run(
+                [firebase_cmd, "deploy", "--only", "hosting"],
+                cwd=script_dir, capture_output=True, text=True, timeout=120
+            )
+            if result.returncode == 0:
+                logger.info("Firebase Hosting 배포 완료")
+            else:
+                logger.warning(f"Firebase Hosting 배포 실패: {result.stderr[:200]}")
+        except subprocess.TimeoutExpired:
+            logger.error("Firebase deploy 타임아웃 (120초)")
+    else:
+        logger.warning("firebase CLI 없음 → Hosting 배포 스킵")
+
+    # 2. Storage 데이터 업로드
+    try:
+        venv_python = script_dir / "venv" / "bin" / "python"
+        python_cmd = str(venv_python) if venv_python.exists() else sys.executable
+        result = subprocess.run(
+            [python_cmd, "upload_dashboard_data.py"],
+            cwd=script_dir, capture_output=True, text=True, timeout=120
+        )
+        if result.returncode == 0:
+            logger.info("Firebase Storage 업로드 완료")
+        else:
+            logger.warning(f"Storage 업로드 실패: {result.stderr[:200]}")
+    except Exception as e:
+        logger.warning(f"Storage 업로드 오류: {e}")
 
 
 def _deploy_github_pages():
@@ -555,4 +819,12 @@ def _write_report_file(report_type: str, report_date: str, text: str) -> Path:
 
 
 if __name__ == "__main__":
+    import fcntl
+    _lock_path = Path(__file__).parent / ".run.lock"
+    _lock_fp = open(_lock_path, "w")
+    try:
+        fcntl.flock(_lock_fp, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        logger.warning("이미 실행 중인 run.py가 있습니다. 종료합니다.")
+        sys.exit(0)
     asyncio.run(main())

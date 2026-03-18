@@ -20,6 +20,7 @@ import os
 import subprocess
 import shutil
 import tempfile
+from pathlib import Path
 
 # ─────────────────────────────────────────────
 # 경로 설정
@@ -42,10 +43,10 @@ from generate_dashboard_data import (
     conn, get_metadata, build_v5_data, get_tab8_by_date, make_embed_data
 )
 
-def build_data():
+def build_data(skip_ai=False):
     """V5 데이터 구조 빌드"""
     db = conn()
-    data_v5 = build_v5_data(db)
+    data_v5 = build_v5_data(db, skip_ai=skip_ai)
     db.close()
     return data_v5
 
@@ -232,13 +233,16 @@ def transform_jsx_python(jsx_src: str) -> str:
         out.append(line)
         i += 1
 
-    out.extend(["", "// ── 마운트 ──",
+    out.extend(["", "// ── 전역 노출 + 조건부 마운트 ──",
+                 "window.App = App;",
                  "const rootEl = document.getElementById('root');",
-                 "try {",
-                 "  ReactDOM.createRoot(rootEl).render(React.createElement(App, null));",
-                 "} catch(e) {",
-                 "  rootEl.innerHTML = '<pre style=\"color:#EF4444;padding:24px;font-size:14px\">' + e.message + '\\n' + e.stack + '</pre>';",
-                 "  console.error('Dashboard mount error:', e);",
+                 "if (window.__GOLF_DATA__ && Object.keys(window.__GOLF_DATA__).length > 0) {",
+                 "  try {",
+                 "    ReactDOM.createRoot(rootEl).render(React.createElement(App, null));",
+                 "  } catch(e) {",
+                 "    rootEl.innerHTML = '<pre style=\"color:#EF4444;padding:24px;font-size:14px\">' + e.message + '\\n' + e.stack + '</pre>';",
+                 "    console.error('Dashboard mount error:', e);",
+                 "  }",
                  "}"])
     return "\n".join(out)
 
@@ -296,19 +300,32 @@ def build_html(data: dict, tab8_today: list, js_content: str, libs: dict | None,
 {js_content}
   </script>"""
 
+    # auth_gate.js 읽기
+    auth_gate_path = Path(__file__).parent / "auth_gate.js"
+    auth_gate_js = auth_gate_path.read_text(encoding="utf-8") if auth_gate_path.exists() else ""
+
     html = f"""<!DOCTYPE html>
 <html lang="ko">
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>⛳ 골프 가격 대시보드 V5.1</title>
+  <title>VERHILL RADAR</title>
   <style>
     *, *::before, *::after {{ box-sizing: border-box; }}
     body {{ margin: 0; font-family: -apple-system, BlinkMacSystemFont, 'Apple SD Gothic Neo', 'Pretendard', 'Noto Sans KR', sans-serif; background: #0F172A; color: #E2E8F0; font-size: 15px; line-height: 1.5; }}
-    ::-webkit-scrollbar {{ width: 6px; height: 10px; }}
+    ::-webkit-scrollbar {{ width: 6px; height: 6px; }}
     ::-webkit-scrollbar-track {{ background: #1a2f5a; border-radius: 5px; }}
     ::-webkit-scrollbar-thumb {{ background: #64748B; border-radius: 5px; }}
     ::-webkit-scrollbar-thumb:hover {{ background: #94A3B8; }}
+    .chart-scroll::-webkit-scrollbar {{ height: 0; display: none; }}
+    .chart-scroll {{ -ms-overflow-style: none; scrollbar-width: none; cursor: grab; }}
+    .chart-scroll:active {{ cursor: grabbing; }}
+    .chart-indicator {{ width: 40px; height: 4px; background: #475569; border-radius: 2px; margin: 8px auto 0; transition: all 0.2s; cursor: pointer; position: relative; }}
+    .chart-indicator:hover {{ background: #64748B; }}
+    .bubble-enter {{ animation: bubbleIn 0.3s cubic-bezier(0.34, 1.56, 0.64, 1) forwards; }}
+    .bubble-exit {{ animation: bubbleOut 0.2s cubic-bezier(0.55, 0.06, 0.68, 0.19) forwards; }}
+    @keyframes bubbleIn {{ from {{ opacity: 0; transform: scale(0.7); }} to {{ opacity: 1; transform: scale(1); }} }}
+    @keyframes bubbleOut {{ from {{ opacity: 1; transform: scale(1); }} to {{ opacity: 0; transform: scale(0.7); }} }}
     select, input, button {{ font-family: inherit; }}
     @media (max-width: 767px) {{
       body {{ font-size: 14px; }}
@@ -316,7 +333,16 @@ def build_html(data: dict, tab8_today: list, js_content: str, libs: dict | None,
   </style>
 </head>
 <body>
-  <div id="root"></div>
+  <!-- 인증 게이트 (로그인 전에 표시) -->
+  <!-- 대시보드 앱 (인증 후 표시) -->
+  <div id="__app_root__" style="display:none;">
+    <div id="root"></div>
+  </div>
+
+  <!-- Firebase 인증 게이트 -->
+  <script type="module">
+{auth_gate_js}
+  </script>
 
   <!-- 에러 핸들러 -->
   <script>
@@ -330,10 +356,10 @@ def build_html(data: dict, tab8_today: list, js_content: str, libs: dict | None,
   </script>
 {lib_block}
 
-  <!-- 골프 데이터 주입 -->
+  <!-- 골프 데이터 주입 (Firebase Storage 모드에서는 비어있음 → auth_gate.js가 로드) -->
   <script>
-    window.__GOLF_DATA__ = {data_json_safe};
-    window.__GOLF_TAB8_TODAY__ = {tab8_today_json_safe};
+    window.__GOLF_DATA__ = window.__GOLF_DATA__ || {data_json_safe};
+    window.__GOLF_TAB8_TODAY__ = window.__GOLF_TAB8_TODAY__ || {tab8_today_json_safe};
   </script>
 {component_block}
 </body>
@@ -344,12 +370,12 @@ def build_html(data: dict, tab8_today: list, js_content: str, libs: dict | None,
 # ─────────────────────────────────────────────
 # 메인
 # ─────────────────────────────────────────────
-def main():
+def main(skip_ai=False):
     print("[build_dashboard V5]")
 
     # 1. V5 데이터
     print("1. DB 데이터 로드 (V5)...")
-    data_v5 = build_data()
+    data_v5 = build_data(skip_ai=skip_ai)
     latest_date = data_v5["metadata"]["latest_date"]
     all_dates = data_v5["metadata"]["all_dates"]
     print(f"   최신 수집일: {latest_date} | 전체 {len(all_dates)}개 날짜")
@@ -396,7 +422,7 @@ def main():
     print("4. HTML 조립 (V5 다크테마)...")
     html = build_html(data, tab8_today, compiled_js, libs, use_babel_cdn)
 
-    # 5. 저장
+    # 5. 저장 (데이터 임베딩 버전 — 로컬/오프라인용)
     with open(OUT_HTML_PATH, "w", encoding="utf-8") as f:
         f.write(html)
 
@@ -408,10 +434,20 @@ def main():
     print(f"   → window.__GOLF_TAB8_TODAY__ 임베딩 (HTML 내부, {len(tab8_today)} slots)")
     print(f"   브라우저에서 열기: open {os.path.basename(OUT_HTML_PATH)}")
 
+    # 6. Firebase Hosting용 HTML (인증 게이트로 보호)
+    hosting_html = build_html(data=data, tab8_today=tab8_today, js_content=compiled_js, libs=libs, use_babel_cdn=use_babel_cdn)
+    hosting_dir = Path(__file__).parent / "docs"
+    hosting_dir.mkdir(exist_ok=True)
+    hosting_path = hosting_dir / "index.html"
+    with open(hosting_path, "w", encoding="utf-8") as f:
+        f.write(hosting_html)
+    hosting_mb = os.path.getsize(hosting_path) / 1024 / 1024
+    print(f"6. → docs/index.html ({hosting_mb:.2f} MB) [Firebase Hosting용 — 데이터 Storage 로드]")
 
-def build_all():
+
+def build_all(skip_ai=False):
     """Entry point for run.py pipeline"""
-    main()
+    main(skip_ai=skip_ai)
 
 
 if __name__ == "__main__":

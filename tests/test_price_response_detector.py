@@ -8,6 +8,19 @@ from analytics import price_response_detector
 from db import database
 
 
+def _run_async(coro):
+    """asyncio.run() 대체: 이미 실행 중인 이벤트 루프가 있어도 동작"""
+    try:
+        asyncio.get_running_loop()
+        loop = asyncio.new_event_loop()
+        try:
+            return loop.run_until_complete(coro)
+        finally:
+            loop.close()
+    except RuntimeError:
+        return asyncio.run(coro)
+
+
 class PriceResponseDetectorTests(unittest.TestCase):
     def test_detect_price_responses_tracks_segment_level_inventory_flow(self):
         async def scenario():
@@ -64,7 +77,7 @@ class PriceResponseDetectorTests(unittest.TestCase):
                     self.assertEqual(row[7], "강함")
                     self.assertEqual(row[8], "high")
 
-        asyncio.run(scenario())
+        _run_async(scenario())
 
 
 if __name__ == "__main__":

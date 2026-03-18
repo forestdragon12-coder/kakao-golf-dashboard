@@ -36,8 +36,22 @@ async def detect_price_changes(report_date: str = None) -> int:
         await db.execute("DELETE FROM price_change_facts WHERE change_detected_at = ?", (report_date,))
 
         # ── 당일 vs 전일: slot_identity_key 기준 동일 슬롯 JOIN
-        #    가격이 달라진 슬롯만 추출
+        #    시간별 수집 시 같은 날 여러 행 → 최신 스냅샷만 비교
         query = """
+            WITH today_latest AS (
+                SELECT *, ROW_NUMBER() OVER (
+                    PARTITION BY COALESCE(slot_identity_key, slot_group_key)
+                    ORDER BY collected_at DESC
+                ) AS _rn
+                FROM tee_time_snapshots WHERE collected_date = ?
+            ),
+            prev_latest AS (
+                SELECT *, ROW_NUMBER() OVER (
+                    PARTITION BY COALESCE(slot_identity_key, slot_group_key)
+                    ORDER BY collected_at DESC
+                ) AS _rn
+                FROM tee_time_snapshots WHERE collected_date = ?
+            )
             SELECT
                 t.id             AS snapshot_id,
                 t.course_id,
@@ -57,11 +71,11 @@ async def detect_price_changes(report_date: str = None) -> int:
                 COALESCE(p.sale_price_krw, p.listed_price_krw, p.price_krw) AS old_price,
                 p.promo_flag     AS old_promo,
                 COALESCE(p.price_badge, p.promo_text) AS old_price_badge
-            FROM tee_time_snapshots t
-            JOIN tee_time_snapshots p
+            FROM today_latest t
+            JOIN prev_latest p
               ON  COALESCE(t.slot_identity_key, t.slot_group_key) = COALESCE(p.slot_identity_key, p.slot_group_key)
-             AND  t.collected_date = ?
-             AND  p.collected_date = ?
+             AND  t._rn = 1
+             AND  p._rn = 1
             WHERE COALESCE(t.sale_price_krw, t.listed_price_krw, t.price_krw) IS NOT NULL
               AND COALESCE(p.sale_price_krw, p.listed_price_krw, p.price_krw) IS NOT NULL
               AND COALESCE(t.sale_price_krw, t.listed_price_krw, t.price_krw)

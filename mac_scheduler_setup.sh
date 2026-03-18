@@ -86,8 +86,8 @@ MONTHLY_HOUR=$REPORT_HOUR_PLUS_ONE
 MONTHLY_MIN=5
 YEARLY_HOUR=$REPORT_HOUR_PLUS_ONE
 YEARLY_MIN=15
-SHUTDOWN_HOUR=$(( (HOUR + 1) % 24 ))
-SHUTDOWN_MIN=10
+SLEEP_HOUR=$(( (HOUR + 1) % 24 ))
+SLEEP_MIN=10
 
 # plist 파일 생성
 TMP_PLIST="$(mktemp)"
@@ -309,41 +309,44 @@ else
 fi
 
 # ────────────────────────────────────────
-# 2단계: 맥 자동 켜기 (pmset wake만, shutdown 제거)
+# 2단계: 맥 기상/전원 켜기 (wakeorpoweron)
 # ────────────────────────────────────────
 echo ""
-echo "[ 2단계 ] 맥 자동 켜기 설정 (꺼짐은 안전 종료 스크립트로 대체)"
-printf "  자동 켜짐: 매일 %02d:%02d (수집 10분 전)\n" $WAKE_HOUR $WAKE_MIN
+echo "[ 2단계 ] 맥 기상/전원 켜기 설정"
+printf "  전원 이벤트: 매일 %02d:%02d (수집 10분 전)\n" $WAKE_HOUR $WAKE_MIN
+echo "  참고: 완전 종료보다 절전 유지가 더 안정적입니다."
 echo "  ⚠️  맥 로그인 비밀번호를 입력하세요:"
 
 sudo pmset repeat \
-    wake     MTWRFSU $(printf '%02d:%02d:00' $WAKE_HOUR $WAKE_MIN)
+    wakeorpoweron MTWRFSU $(printf '%02d:%02d:00' $WAKE_HOUR $WAKE_MIN)
 
-echo "  ✅ 맥 자동 켜기 설정 완료 (pmset shutdown 제거됨)"
+echo "  ✅ 맥 기상/전원 켜기 설정 완료"
 
 # ────────────────────────────────────────
-# 3단계: 안전 종료 스크립트 (5분 전 경고 + 사용중이면 취소)
+# 3단계: 안전 절전 스크립트 (5분 전 경고 + 사용중이면 취소)
 # ────────────────────────────────────────
-SHUTDOWN_LABEL="com.kakao.golf.safe-shutdown"
-SHUTDOWN_PLIST="/Library/LaunchDaemons/$SHUTDOWN_LABEL.plist"
+SLEEP_LABEL="com.kakao.golf.safe-sleep"
+SLEEP_PLIST="/Library/LaunchDaemons/$SLEEP_LABEL.plist"
+LEGACY_SHUTDOWN_LABEL="com.kakao.golf.safe-shutdown"
+LEGACY_SHUTDOWN_PLIST="/Library/LaunchDaemons/$LEGACY_SHUTDOWN_LABEL.plist"
 
 echo ""
-echo "[ 3단계 ] 안전 종료 스케줄 등록"
-printf "  종료 시도: 매일 %02d:%02d (사용중이면 자동 취소)\n" $SHUTDOWN_HOUR $SHUTDOWN_MIN
+echo "[ 3단계 ] 안전 절전 스케줄 등록"
+printf "  절전 시도: 매일 %02d:%02d (사용중이면 자동 취소)\n" $SLEEP_HOUR $SLEEP_MIN
 
-TMP_SHUTDOWN_PLIST="$(mktemp)"
-cat > "$TMP_SHUTDOWN_PLIST" << PLIST
+TMP_SLEEP_PLIST="$(mktemp)"
+cat > "$TMP_SLEEP_PLIST" << PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
   "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
     <key>Label</key>
-    <string>${SHUTDOWN_LABEL}</string>
+    <string>${SLEEP_LABEL}</string>
     <key>ProgramArguments</key>
     <array>
         <string>/bin/bash</string>
-        <string>${SCRIPT_DIR}/safe_shutdown.sh</string>
+        <string>${SCRIPT_DIR}/safe_sleep.sh</string>
     </array>
     <key>UserName</key>
     <string>root</string>
@@ -352,27 +355,29 @@ cat > "$TMP_SHUTDOWN_PLIST" << PLIST
     <key>StartCalendarInterval</key>
     <dict>
         <key>Hour</key>
-        <integer>${SHUTDOWN_HOUR}</integer>
+        <integer>${SLEEP_HOUR}</integer>
         <key>Minute</key>
-        <integer>${SHUTDOWN_MIN}</integer>
+        <integer>${SLEEP_MIN}</integer>
     </dict>
     <key>RunAtLoad</key>
     <false/>
     <key>StandardOutPath</key>
-    <string>${LOG_DIR}/shutdown_daemon_out.log</string>
+    <string>${LOG_DIR}/sleep_daemon_out.log</string>
     <key>StandardErrorPath</key>
-    <string>${LOG_DIR}/shutdown_daemon_err.log</string>
+    <string>${LOG_DIR}/sleep_daemon_err.log</string>
 </dict>
 </plist>
 PLIST
 
-sudo install -o root -g wheel -m 644 "$TMP_SHUTDOWN_PLIST" "$SHUTDOWN_PLIST"
-rm -f "$TMP_SHUTDOWN_PLIST"
+sudo install -o root -g wheel -m 644 "$TMP_SLEEP_PLIST" "$SLEEP_PLIST"
+rm -f "$TMP_SLEEP_PLIST"
 
-sudo launchctl bootout system/$SHUTDOWN_LABEL 2>/dev/null || true
-sudo launchctl bootstrap system "$SHUTDOWN_PLIST"
-sudo launchctl enable system/$SHUTDOWN_LABEL
-echo "  ✅ 안전 종료 스케줄 등록 완료"
+sudo launchctl bootout system/$LEGACY_SHUTDOWN_LABEL 2>/dev/null || true
+sudo rm -f "$LEGACY_SHUTDOWN_PLIST"
+sudo launchctl bootout system/$SLEEP_LABEL 2>/dev/null || true
+sudo launchctl bootstrap system "$SLEEP_PLIST"
+sudo launchctl enable system/$SLEEP_LABEL
+echo "  ✅ 안전 절전 스케줄 등록 완료"
 
 # ────────────────────────────────────────
 # 완료
@@ -381,7 +386,7 @@ echo ""
 echo "================================================"
 echo "🎉 설정 완료!"
 echo ""
-printf "  %02d:%02d  맥 자동 켜짐 (pmset wake)\n" $WAKE_HOUR $WAKE_MIN
+printf "  %02d:%02d  맥 기상 또는 전원 켜기 (pmset wakeorpoweron)\n" $WAKE_HOUR $WAKE_MIN
 printf "  %02d:00  수집봇 자동 실행 (로그인 없이 동작)\n" $HOUR
 if [ "$REPORTS_ENABLED" = "true" ]; then
     printf "  %02d:%02d  주간 보고서 자동 생성 (월요일)\n" $WEEKLY_HOUR $WEEKLY_MIN
@@ -390,10 +395,10 @@ if [ "$REPORTS_ENABLED" = "true" ]; then
 else
     echo "  보고서 자동 생성 비활성화"
 fi
-printf "  %02d:%02d  안전 종료 시도 (사용중이면 취소, 5분전 경고)\n" $SHUTDOWN_HOUR $SHUTDOWN_MIN
+printf "  %02d:%02d  안전 절전 시도 (사용중이면 취소, 5분전 경고)\n" $SLEEP_HOUR $SLEEP_MIN
 echo ""
 echo "  지금 바로 테스트: sudo launchctl kickstart -k system/$PLIST_LABEL"
-echo "  종료 테스트:     sudo launchctl kickstart -k system/$SHUTDOWN_LABEL"
+echo "  절전 테스트:     sudo launchctl kickstart -k system/$SLEEP_LABEL"
 if [ "$REPORTS_ENABLED" = "true" ]; then
     echo "  주간 보고서 테스트: sudo launchctl kickstart -k system/$WEEKLY_LABEL"
 fi

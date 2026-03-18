@@ -14,6 +14,19 @@ from analytics.report_generator import (
 from db import database
 
 
+def _run_async(coro):
+    """asyncio.run() 대체: 이미 실행 중인 이벤트 루프가 있어도 동작"""
+    try:
+        asyncio.get_running_loop()
+        loop = asyncio.new_event_loop()
+        try:
+            return loop.run_until_complete(coro)
+        finally:
+            loop.close()
+    except RuntimeError:
+        return asyncio.run(coro)
+
+
 class PeriodReportTests(unittest.TestCase):
     def test_period_payloads_and_renderers_handle_partial_data(self):
         async def scenario():
@@ -64,7 +77,7 @@ class PeriodReportTests(unittest.TestCase):
                     self.assertTrue(monthly["risks"])
                     self.assertTrue(yearly["risks"])
 
-        asyncio.run(scenario())
+        _run_async(scenario())
 
 
 if __name__ == "__main__":

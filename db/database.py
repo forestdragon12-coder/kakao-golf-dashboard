@@ -324,6 +324,30 @@ CREATE TABLE IF NOT EXISTS competitive_segment_facts (
     UNIQUE(report_date, competitor_group, course_name, part_type, weekday_type, season)
 );
 
+-- 미판매 슬롯 (팔리지 않고 경기일 지난 슬롯)
+CREATE TABLE IF NOT EXISTS unsold_slots (
+    id                INTEGER PRIMARY KEY AUTOINCREMENT,
+    play_date         TEXT NOT NULL,
+    course_name       TEXT NOT NULL,
+    course_sub        TEXT,
+    membership_type   TEXT,
+    tee_time          TEXT,
+    price_krw         INTEGER,
+    part_type         TEXT,
+    weekday_type      TEXT,
+    promo_flag        INTEGER DEFAULT 0,
+    first_seen_date   TEXT,       -- 최초 오픈일
+    last_seen_date    TEXT,       -- 마지막 관측일 (D-1)
+    days_on_market    INTEGER,    -- 판매 노출 일수
+    slot_group_key    TEXT,
+    recorded_date     TEXT NOT NULL,  -- 기록일 (수집일)
+    UNIQUE(play_date, course_name, tee_time, course_sub)
+);
+
+CREATE INDEX IF NOT EXISTS idx_unsold_play ON unsold_slots(play_date);
+CREATE INDEX IF NOT EXISTS idx_unsold_course ON unsold_slots(course_name);
+CREATE INDEX IF NOT EXISTS idx_unsold_recorded ON unsold_slots(recorded_date);
+
 CREATE INDEX IF NOT EXISTS idx_snap_play       ON tee_time_snapshots(play_date);
 CREATE INDEX IF NOT EXISTS idx_snap_course     ON tee_time_snapshots(course_name);
 CREATE INDEX IF NOT EXISTS idx_snap_collect    ON tee_time_snapshots(collected_date);
@@ -338,6 +362,57 @@ CREATE INDEX IF NOT EXISTS idx_de_event_date   ON discount_events(event_date);
 CREATE INDEX IF NOT EXISTS idx_de_course       ON discount_events(course_name);
 CREATE INDEX IF NOT EXISTS idx_drm_event_date  ON discount_response_metrics(event_date);
 CREATE INDEX IF NOT EXISTS idx_drm_course      ON discount_response_metrics(course_name);
+
+-- 시간별 요약 (매 수집 후 생성)
+CREATE TABLE IF NOT EXISTS hourly_summary (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    collected_at    TEXT NOT NULL,
+    collected_date  TEXT NOT NULL,
+    course_name     TEXT NOT NULL,
+    play_date       TEXT NOT NULL,
+    d_day           INTEGER,
+    remaining       INTEGER,
+    min_price       INTEGER,
+    avg_price       REAL,
+    max_price       INTEGER,
+    promo_count     INTEGER DEFAULT 0,
+    UNIQUE(collected_at, course_name, play_date)
+);
+CREATE INDEX IF NOT EXISTS idx_hourly_sum_date ON hourly_summary(collected_date);
+CREATE INDEX IF NOT EXISTS idx_hourly_sum_at ON hourly_summary(collected_at);
+
+-- 시간별 가격 변동 이벤트 (직전 수집 대비)
+CREATE TABLE IF NOT EXISTS hourly_price_events (
+    id                INTEGER PRIMARY KEY AUTOINCREMENT,
+    detected_at       TEXT NOT NULL,
+    prev_collected_at TEXT,
+    course_name       TEXT,
+    play_date         TEXT,
+    tee_time          TEXT,
+    course_sub        TEXT,
+    slot_identity_key TEXT,
+    old_price_krw     INTEGER,
+    new_price_krw     INTEGER,
+    delta_krw         INTEGER,
+    delta_pct         REAL,
+    event_type        TEXT,
+    old_promo_flag    INTEGER DEFAULT 0,
+    new_promo_flag    INTEGER DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS idx_hpe_detected ON hourly_price_events(detected_at);
+CREATE INDEX IF NOT EXISTS idx_hpe_course ON hourly_price_events(course_name);
+
+-- 시간별 수집 대응: 같은 날 같은 슬롯 중 최신 스냅샷만 노출하는 뷰
+-- generate_dashboard_data.py 등에서 tee_time_snapshots 대신 이 뷰를 참조
+DROP VIEW IF EXISTS latest_daily_snapshots;
+CREATE VIEW latest_daily_snapshots AS
+SELECT * FROM (
+    SELECT *, ROW_NUMBER() OVER (
+        PARTITION BY collected_date, COALESCE(slot_identity_key, slot_group_key)
+        ORDER BY collected_at DESC
+    ) AS _rn
+    FROM tee_time_snapshots
+) WHERE _rn = 1;
 """
 
 # 기존 DB에 신규 컬럼 추가 (ALTER TABLE은 컬럼 없을 때만 시도)
@@ -367,12 +442,33 @@ MIGRATIONS = [
     ("tee_time_snapshots",    "price_change_count_7d", "INTEGER DEFAULT 0"),
     ("tee_time_snapshots",    "first_discount_dday", "INTEGER"),
     ("daily_course_metrics",  "member_open_flag", "INTEGER DEFAULT NULL"),
+    ("unsold_slots",          "weather_cause",    "TEXT"),
+    ("tee_time_snapshots",    "collected_at",     "TEXT"),
 ]
 
 
-def make_hash(course_name, collected_date, play_date, tee_time, course_sub=""):
-    """수집 고유키: course_sub 포함 → 동일 시간 복수 코스 충돌 방지"""
-    raw = f"{course_name}|{collected_date}|{play_date}|{tee_time}|{course_sub or ''}"
+def latest_snapshot_cte(date_params="?", table="tee_time_snapshots"):
+    """하루 최신 스냅샷 CTE — 시간별 수집 시 같은 슬롯 중복 방지.
+
+    사용법:
+        query = latest_snapshot_cte() + "SELECT ... FROM latest_snap WHERE ..."
+        db.execute(query, (report_date,))
+    """
+    return f"""
+    WITH latest_snap AS (
+        SELECT *, ROW_NUMBER() OVER (
+            PARTITION BY COALESCE(slot_identity_key, slot_group_key)
+            ORDER BY collected_at DESC
+        ) AS _rn
+        FROM {table}
+        WHERE collected_date = {date_params}
+    )
+    """
+
+
+def make_hash(course_name, collected_at, play_date, tee_time, course_sub=""):
+    """수집 고유키: collected_at(시간 포함) 사용 → 매시간 수집 구분"""
+    raw = f"{course_name}|{collected_at}|{play_date}|{tee_time}|{course_sub or ''}"
     return hashlib.md5(raw.encode()).hexdigest()
 
 def make_slot_key(course_name, play_date, tee_time, course_sub=""):
@@ -401,8 +497,8 @@ def make_slot_identity_key(course_id, play_date, tee_time, part_type, course_var
     return hashlib.md5(raw.encode()).hexdigest()
 
 
-def make_slot_observation_key(slot_identity_key, collected_date):
-    raw = f"{slot_identity_key}|{collected_date}"
+def make_slot_observation_key(slot_identity_key, collected_at):
+    raw = f"{slot_identity_key}|{collected_at}"
     return hashlib.md5(raw.encode()).hexdigest()
 
 
@@ -431,6 +527,18 @@ async def migrate_db():
         await db.execute(
             "CREATE INDEX IF NOT EXISTS idx_snap_identity_key ON tee_time_snapshots(slot_identity_key)"
         )
+        await db.execute(
+            "CREATE INDEX IF NOT EXISTS idx_snap_collected_at ON tee_time_snapshots(collected_at)"
+        )
+        await db.execute(
+            "CREATE INDEX IF NOT EXISTS idx_snap_date_at ON tee_time_snapshots(collected_date, collected_at)"
+        )
+
+        # collected_at 백필: 기존 데이터에 시간 정보 추가 (05:00 가정)
+        await db.execute(
+            "UPDATE tee_time_snapshots SET collected_at = collected_date || 'T05:00:00' WHERE collected_at IS NULL"
+        )
+
         await _backfill_snapshot_keys(db)
         await db.commit()
 
@@ -444,7 +552,7 @@ async def _backfill_snapshot_keys(db: aiosqlite.Connection):
                hash_key, slot_group_key, source_channel, course_variant,
                slot_identity_key, slot_observation_key, slot_status,
                visible_flag, inventory_observed_flag, listed_price_krw,
-               sale_price_krw, price_badge
+               sale_price_krw, price_badge, collected_at
         FROM tee_time_snapshots
         WHERE hash_key IS NULL
            OR slot_group_key IS NULL
@@ -486,6 +594,7 @@ async def _backfill_snapshot_keys(db: aiosqlite.Connection):
             "listed_price_krw": row[20],
             "sale_price_krw": row[21],
             "price_badge": row[22],
+            "collected_at": row[23],
         }
         prepared = _prepare_snapshot_row(snapshot)
         await db.execute(
@@ -531,9 +640,11 @@ def _prepare_snapshot_row(row: dict) -> dict:
     part_type = prepared.get("part_type")
     prepared["source_channel"] = source_channel
     prepared["course_variant"] = course_variant
+    collected_at = prepared.get("collected_at") or (prepared["collected_date"] + "T05:00:00")
+    prepared["collected_at"] = collected_at
     prepared["hash_key"] = prepared.get("hash_key") or make_hash(
         prepared["course_name"],
-        prepared["collected_date"],
+        collected_at,
         prepared["play_date"],
         prepared["tee_time"],
         course_sub,
@@ -555,7 +666,7 @@ def _prepare_snapshot_row(row: dict) -> dict:
     prepared["slot_identity_version"] = prepared.get("slot_identity_version") or 1
     prepared["slot_observation_key"] = prepared.get("slot_observation_key") or make_slot_observation_key(
         prepared["slot_identity_key"],
-        prepared["collected_date"],
+        collected_at,
     )
     prepared["slot_status"] = prepared.get("slot_status") or "available"
     prepared["status_reason"] = prepared.get("status_reason") or "observed_in_listing"
@@ -621,7 +732,7 @@ async def insert_snapshots(rows: list[dict]) -> int:
                 prepared = _prepare_snapshot_row(r)
                 await db.execute("""
                     INSERT OR IGNORE INTO tee_time_snapshots
-                    (crawl_run_id, course_id, course_name, collected_date, play_date,
+                    (crawl_run_id, course_id, course_name, collected_date, collected_at, play_date,
                      tee_time, price_krw, course_sub, membership_type,
                      promo_flag, promo_text, pax_condition, price_type,
                      d_day, part_type, season, weekday_type, source_channel,
@@ -630,11 +741,11 @@ async def insert_snapshots(rows: list[dict]) -> int:
                      listed_price_krw, normal_price_krw, sale_price_krw, price_badge,
                      previous_price_krw, price_changed_flag, price_change_delta_krw, price_change_delta_pct,
                      price_change_count_7d, first_discount_dday, hash_key, slot_group_key)
-                    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                 """, (
                     prepared["crawl_run_id"], prepared["course_id"], prepared["course_name"],
-                    prepared["collected_date"], prepared["play_date"], prepared["tee_time"],
-                    prepared.get("price_krw"), prepared.get("course_sub"), prepared.get("membership_type"),
+                    prepared["collected_date"], prepared.get("collected_at"), prepared["play_date"],
+                    prepared["tee_time"], prepared.get("price_krw"), prepared.get("course_sub"), prepared.get("membership_type"),
                     prepared.get("promo_flag", 0), prepared.get("promo_text"),
                     prepared.get("pax_condition"), prepared.get("price_type"),
                     prepared["d_day"], prepared["part_type"], prepared["season"], prepared["weekday_type"],

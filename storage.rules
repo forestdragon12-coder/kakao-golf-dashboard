@@ -1,0 +1,10 @@
+rules_version = '2';
+service firebase.storage {
+  match /b/{bucket}/o {
+    // 대시보드 데이터: 인증된 사용자만 읽기
+    match /dashboard/{allPaths=**} {
+      allow read: if request.auth != null;
+      allow write: if false; // 서버(Admin SDK)로만 업로드
+    }
+  }
+}
